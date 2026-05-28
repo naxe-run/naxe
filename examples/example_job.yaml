@@ -1,0 +1,15 @@
+job: "refactor auth system"
+tasks:
+  - id: t1
+    name: Write tests for auth module
+    description: Cover login, logout, token refresh, and edge cases
+  - id: t2
+    name: Refactor auth module
+    depends_on: [t1]
+  - id: t3
+    name: Update API docs
+    depends_on: [t2]
+  - id: t4
+    name: Notify team in Slack
+    duration_minutes: 2
+    depends_on: [t3]

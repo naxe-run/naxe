@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naxe"
+version = "0.1.0"
+description = "Dependency-aware task graph engine for AI agents (MCP server)"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "pyyaml>=6.0",
+    "rich>=13.9.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+postgres = [
+    "psycopg[binary]>=3.1",
+]
+
+[project.scripts]
+naxe = "naxe.server:main"
+naxe-config = "naxe.cli_config:main"
+naxe-watch = "naxe.watch:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["naxe*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]

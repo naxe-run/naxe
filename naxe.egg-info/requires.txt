@@ -1,0 +1,10 @@
+mcp>=1.0.0
+pyyaml>=6.0
+rich>=13.9.4
+
+[dev]
+pytest>=8.0
+pytest-asyncio>=0.23
+
+[postgres]
+psycopg[binary]>=3.1

@@ -1,0 +1,4 @@
+[console_scripts]
+naxe = naxe.server:main
+naxe-config = naxe.cli_config:main
+naxe-watch = naxe.watch:main
