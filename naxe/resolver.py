@@ -28,12 +28,17 @@ def detect_cycle(tasks: list[dict]) -> bool:
     return any(dfs(n) for n in list(graph) if color[n] == WHITE)
 
 
-def get_next_actions(conn, job_id: str) -> list[dict]:
-    """Return all pending tasks whose dependencies are all completed."""
+def get_next_actions(conn, job_id: str, repo: str | None = None) -> list[dict]:
+    """Return all pending tasks whose dependencies are all completed.
+
+    If repo is provided, only tasks with that repo or no repo (NULL) are returned.
+    """
     pending = conn.execute(
         "SELECT * FROM tasks WHERE job_id = %s AND status = 'pending'",
         (job_id,),
     ).fetchall()
+    if repo is not None:
+        pending = [t for t in pending if t.get("repo") is None or t.get("repo") == repo]
 
     result = []
     for task in pending:
@@ -99,6 +104,29 @@ def get_newly_unblocked(
             result.append(t)
 
     return result
+
+
+def get_blocking_reasons(conn, job_id: str) -> list[dict]:
+    """Return tasks that are blocked, with their incomplete dependencies."""
+    rows = conn.execute(
+        """SELECT t.id, t.name, dep.id AS dep_id, dep.name AS dep_name, dep.status AS dep_status
+           FROM tasks t
+           JOIN dependencies d ON d.task_id = t.id
+           JOIN tasks dep ON dep.id = d.depends_on_task_id
+           WHERE t.job_id = %s""",
+        (job_id,),
+    ).fetchall()
+    blocked: dict[str, dict] = {}
+    for row in rows:
+        if row["dep_status"] == "completed":
+            continue
+        tid = row["id"]
+        if tid not in blocked:
+            blocked[tid] = {"id": tid, "name": row["name"], "blocked_by": []}
+        blocked[tid]["blocked_by"].append(
+            {"id": row["dep_id"], "name": row["dep_name"], "status": row["dep_status"]}
+        )
+    return list(blocked.values())
 
 
 def is_job_unblocked(conn, job_id: str) -> bool:

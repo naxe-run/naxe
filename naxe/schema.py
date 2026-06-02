@@ -6,7 +6,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    status      TEXT NOT NULL DEFAULT 'active'
+    status      TEXT NOT NULL DEFAULT 'active',
+    output      TEXT,
+    paused      INTEGER NOT NULL DEFAULT 0,
+    worktree    INTEGER NOT NULL DEFAULT 0,
+    worktree_paths  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -22,8 +26,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count      INTEGER NOT NULL DEFAULT 0,
     input            TEXT,
     resources        TEXT,
+    repo             TEXT,
     progress         INTEGER NOT NULL DEFAULT 0,
     priority         INTEGER NOT NULL DEFAULT 50,
+    approved_by      TEXT,
+    approval_notes   TEXT,
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    human_task       INTEGER NOT NULL DEFAULT 0,
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -128,10 +137,19 @@ _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN progress INTEGER DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN max_workers INTEGER DEFAULT NULL",
     "ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 50",
+    "ALTER TABLE tasks ADD COLUMN repo TEXT",
+    "ALTER TABLE jobs ADD COLUMN output TEXT",
+    "ALTER TABLE tasks ADD COLUMN approved_by TEXT",
+    "ALTER TABLE tasks ADD COLUMN approval_notes TEXT",
+    "ALTER TABLE jobs ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN worktree INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN worktree_paths TEXT",
+    "ALTER TABLE tasks ADD COLUMN human_task INTEGER NOT NULL DEFAULT 0",
 ]
 
 
-def _init_schema(conn) -> None:
+def _init_schema(conn, is_postgres: bool = False) -> None:
     global _migrations_run
     # Always run CREATE TABLE / INDEX — safe, idempotent, needed for new tables
     for statement in DDL.strip().split(";"):
@@ -143,6 +161,10 @@ def _init_schema(conn) -> None:
     if not _migrations_run:
         for migration in _MIGRATIONS:
             try:
+                if is_postgres:
+                    # PostgreSQL supports IF NOT EXISTS to avoid DDL lock contention
+                    # when columns already exist. SQLite does not support this syntax.
+                    migration = migration.replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS ")
                 conn.execute(migration)
                 conn.commit()
             except Exception:
@@ -150,12 +172,15 @@ def _init_schema(conn) -> None:
         _migrations_run = True
 
 
-def get_connection(url: str):
+def get_connection(url: str, readonly: bool = False):
     """
     Return a database connection for the given URL.
 
     - postgresql:// or postgres:// → psycopg (PostgreSQL)
     - anything else                → SQLite file path (or :memory: for tests)
+
+    Pass readonly=True to skip schema initialisation (for read-only consumers
+    like the watch command that must not compete for DDL write locks).
     """
     if url.startswith("postgresql://") or url.startswith("postgres://"):
         try:
@@ -167,7 +192,8 @@ def get_connection(url: str):
                 "Install it with: pip install 'naxe[postgres]'"
             )
         conn = psycopg.connect(url, row_factory=dict_row, autocommit=False)
-        _init_schema(conn)
+        if not readonly:
+            _init_schema(conn, is_postgres=True)
         return conn
 
     # SQLite path
@@ -176,5 +202,6 @@ def get_connection(url: str):
     raw.execute("PRAGMA journal_mode=WAL")
     raw.execute("PRAGMA foreign_keys=ON")
     conn = _SQLiteConnection(raw)
-    _init_schema(conn)
+    if not readonly:
+        _init_schema(conn)
     return conn

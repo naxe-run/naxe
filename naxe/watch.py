@@ -12,11 +12,11 @@ from naxe import store
 from naxe.config import resolve_db_url
 
 _HEADER = (
-    "███╗  ██╗ █████╗ ██╗  ██╗███████╗   /|\n"
-    "████╗ ██║██╔══██╗╚██╗██╔╝██╔════╝  / |\n"
-    "██╔██╗██║███████║ ╚███╔╝ █████╗   <  |\n"
-    "██║╚████║██║  ██║ ██╔██╗ ██╔══╝    \\ |\n"
-    "██║ ╚███║██║  ██║██╔╝ ██╗███████╗   \\|"
+    "███╗  ██╗ █████╗ ██╗  ██╗███████╗\n"
+    "████╗ ██║██╔══██╗╚██╗██╔╝██╔════╝\n"
+    "██╔██╗██║███████║ ╚███╔╝ █████╗\n"
+    "██║╚████║██║  ██║ ██╔██╗ ██╔══╝\n"
+    "██║ ╚███║██║  ██║██╔╝ ██╗███████╗"
 )
 
 DB_URL = resolve_db_url()
@@ -27,6 +27,7 @@ _STATUS_STYLE = {
     "completed": "green",
     "failed": "bold red",
     "cancelled": "dim red",
+    "awaiting_approval": "bold blue",
 }
 
 _STATUS_SYMBOL = {
@@ -35,6 +36,7 @@ _STATUS_SYMBOL = {
     "completed": "●",
     "failed": "✗",
     "cancelled": "⊘",
+    "awaiting_approval": "⧗",
 }
 
 
@@ -45,8 +47,16 @@ def _progress_bar(progress: int, width: int = 8) -> str:
 
 def _task_label(task: dict) -> Text:
     status = task["status"]
-    style = _STATUS_STYLE.get(status, "")
-    symbol = _STATUS_SYMBOL.get(status, "●")
+    is_human = bool(task.get("human_task"))
+    if is_human and status == "pending":
+        symbol, style = "☻", "dim"
+    elif is_human and status == "awaiting_approval":
+        symbol, style = "☻", "bold magenta"
+    elif bool(task.get("requires_approval")) and status == "pending":
+        symbol, style = "⧗", "dim"
+    else:
+        style = _STATUS_STYLE.get(status, "")
+        symbol = _STATUS_SYMBOL.get(status, "●")
     short_id = task["id"][:8]
     label = Text()
     label.append(f"{symbol} {task['name']}", style=style)
@@ -165,13 +175,13 @@ def build_renderable(conn, session_start: str):
 
 def main():
     session_start = datetime.now(timezone.utc).isoformat()
-    conn = get_connection(DB_URL)
+    conn = get_connection(DB_URL, readonly=True)
     try:
         with Live(build_renderable(conn, session_start), refresh_per_second=2, screen=True) as live:
-            conn.commit()
+            conn.rollback()
             while True:
                 time.sleep(2)
                 live.update(build_renderable(conn, session_start))
-                conn.commit()
+                conn.rollback()
     except KeyboardInterrupt:
         pass

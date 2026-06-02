@@ -7,7 +7,7 @@ from naxe import store, resolver
 
 @pytest.fixture
 def conn():
-    naxe_schema._schema_initialized = False
+    naxe_schema._migrations_run = False
     c = get_connection(":memory:")
     yield c
     c.close()

@@ -62,6 +62,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "name": {"type": "string", "description": "Human-readable job name"},
                     "max_workers": {"type": "integer", "description": "Max number of agents that can work this job concurrently (omit for unlimited)"},
+                    "worktree": {"type": "boolean", "description": "Set to true if this job runs in an isolated git worktree. When true, resource conflict checks are scoped to this job only. When false (default), resource conflicts are checked across all non-worktree jobs."},
                 },
                 "required": ["name"],
             },
@@ -90,7 +91,10 @@ async def list_tools() -> list[Tool]:
                                 "max_retries": {"type": "integer", "description": "Number of times to retry this task on failure (default 0)"},
                                 "input": {"type": "string", "description": "Structured input data for the task (passed through to task record)"},
                                 "resources": {"type": "array", "items": {"type": "string"}, "description": "Resource names (e.g. file paths) this task exclusively holds. claim_next_action skips tasks whose resources conflict with an in-progress task."},
+                                "repo": {"type": "string", "description": "Repository identifier this task is scoped to (e.g. 'org/repo'). Tasks without a repo can be claimed by any agent. Tasks with a repo can only be claimed by agents that specify that repo (or agents without a repo filter)."},
                                 "priority": {"type": "integer", "description": "Task priority 0–100 (default 50). Higher values are claimed first by claim_next_action."},
+                                "requires_approval": {"type": "boolean", "description": "Set to true if this task must go through the approval flow (request_approval → approve_task) before it can be completed. An agent that tries to call complete_task directly on a requires_approval task will receive an error and must call request_approval first. Use this for tasks involving irreversible actions, external communication, financial operations, or anything requiring human sign-off."},
+                                "human_task": {"type": "boolean", "description": "Set to true for tasks performed entirely by a human, not an agent. Human tasks are never claimable by agents. When all dependencies complete, the task auto-transitions to awaiting_approval. A human confirms completion via approve_task or rejects via reject_task. Use requires_approval for agent-executed tasks that need human sign-off; use human_task for tasks the agent will not perform at all."},
                             },
                             "required": ["name"],
                         },
@@ -109,7 +113,10 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}},
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "repo": {"type": "string", "description": "If provided, only return tasks scoped to this repo or tasks with no repo set."},
+                },
                 "required": ["job_id"],
             },
         ),
@@ -135,7 +142,9 @@ async def list_tools() -> list[Tool]:
                 "REQUIRED: Call this immediately when a task is finished. Marks it complete and "
                 "returns newly_unblocked — the tasks that just became available. Pass output to "
                 "record findings or results; downstream tasks can read it via get_job_status. "
-                "Always call this before moving on; do not skip it or track completion internally."
+                "Always call this before moving on; do not skip it or track completion internally. "
+                "NOTE: Tasks with human_task=true can never be completed by agents — they must be "
+                "resolved via approve_task or reject_task."
             ),
             inputSchema={
                 "type": "object",
@@ -208,6 +217,31 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="pause_job",
+            description=(
+                "Pause a job so that no new tasks can be claimed by workers. In-progress tasks "
+                "continue until they complete or fail. Use resume_job to allow claiming again. "
+                "Returns the updated job."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="resume_job",
+            description=(
+                "Resume a previously paused job, allowing workers to claim tasks again. "
+                "Returns the updated job."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        ),
+        Tool(
             name="claim_next_action",
             description=(
                 "Worker tool: atomically find and claim the next available unblocked task "
@@ -222,6 +256,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "job_id": {"type": "string"},
                     "agent_id": {"type": "string", "description": "Identifier for this agent instance"},
+                    "repo": {"type": "string", "description": "If provided, only claim tasks scoped to this repo or tasks with no repo set."},
                 },
                 "required": ["job_id", "agent_id"],
             },
@@ -295,6 +330,26 @@ async def list_tools() -> list[Tool]:
                     "max_workers": {"type": ["integer", "null"], "description": "Max concurrent agents, or null for unlimited"},
                 },
                 "required": ["job_id", "max_workers"],
+            },
+        ),
+        Tool(
+            name="set_worktree_paths",
+            description=(
+                "Store the filesystem paths of git worktrees created for this job, keyed by repo "
+                "identifier. Call after running `git worktree add` for each repo involved in the job. "
+                "Subagents read paths via get_job_status to know which directory to work in. "
+                "Pass an empty object to clear all paths."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "paths": {
+                        "type": "object",
+                        "description": 'Map of repo identifier to absolute worktree path. Example: {"org/frontend": "/worktrees/job-abc/frontend"}',
+                    },
+                },
+                "required": ["job_id", "paths"],
             },
         ),
         Tool(
@@ -408,6 +463,86 @@ async def list_tools() -> list[Tool]:
                 "required": ["job_id"],
             },
         ),
+        Tool(
+            name="get_blocked_tasks",
+            description=(
+                "Return all pending tasks in a job that are blocked by incomplete dependencies. "
+                "Each entry includes the task id and name, plus a blocked_by list showing which "
+                "dependencies are not yet completed (with their id, name, and current status). "
+                "Tasks with no dependencies that are simply unstarted are NOT included."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"job_id": {"type": "string"}},
+                "required": ["job_id"],
+            },
+        ),
+        Tool(
+            name="requeue_task",
+            description=(
+                "Reset a failed or cancelled task back to pending so it can be claimed and retried. "
+                "Optionally provide new input data to override the task's existing input. "
+                "Has no effect on tasks that are not in a failed or cancelled state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "input": {"type": "string", "description": "Optional new input data to replace the task's existing input"},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="request_approval",
+            description=(
+                "Transition a task you own from in_progress to awaiting_approval. "
+                "Downstream tasks that depend on this task will remain blocked until it is "
+                "approved or rejected. Only the agent that claimed the task may request approval."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string", "description": "Must match the agent that claimed the task"},
+                    "notes": {"type": "string", "description": "Optional notes explaining what needs approval"},
+                },
+                "required": ["task_id", "agent_id"],
+            },
+        ),
+        Tool(
+            name="approve_task",
+            description=(
+                "Approve a task that is awaiting approval, marking it completed and unblocking "
+                "downstream tasks. Returns the updated task and newly unblocked tasks."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "approver_id": {"type": "string", "description": "Identifier of the approver"},
+                    "notes": {"type": "string", "description": "Optional approval notes"},
+                },
+                "required": ["task_id", "approver_id"],
+            },
+        ),
+        Tool(
+            name="reject_task",
+            description=(
+                "Reject a task that is awaiting approval, marking it failed. "
+                "If the task has retries configured, it will be automatically re-queued. "
+                "Returns the updated task."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "approver_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Reason for rejection"},
+                },
+                "required": ["task_id", "approver_id", "reason"],
+            },
+        ),
     ]
 
 
@@ -428,7 +563,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextContent]:
     if name == "create_job":
-        job = store.create_job(conn, arguments["name"], arguments.get("max_workers"))
+        job = store.create_job(
+            conn, arguments["name"],
+            arguments.get("max_workers"),
+            worktree=arguments.get("worktree", False),
+        )
         return _ok(job_id=job["id"], job=job)
 
     if name == "add_tasks":
@@ -453,7 +592,7 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         return _ok(added=len(task_ids), task_ids=task_ids)
 
     if name == "get_next_actions":
-        actions = resolver.get_next_actions(conn, arguments["job_id"])
+        actions = resolver.get_next_actions(conn, arguments["job_id"], arguments.get("repo"))
         return _ok(next_actions=actions)
 
     if name == "claim_task":
@@ -469,17 +608,20 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         task = store.get_task(conn, task_id)
         if not task:
             return _err(f"Task '{task_id}' not found")
+        result = store.complete_task(conn, task_id, agent_id, arguments.get("output"))
+        if "error" in result:
+            return _err(result["error"])
         warning = None
         if task.get("owner_agent_id") and task["owner_agent_id"] != agent_id:
             warning = f"Task owned by '{task['owner_agent_id']}', completing anyway (orchestrator override)"
-        updated = store.update_task_status(conn, task_id, "completed", agent_id, arguments.get("output"))
+        updated = result["task"]
         newly_unblocked = resolver.get_newly_unblocked(conn, task["job_id"], task_id)
-        result: dict[str, Any] = {"success": True, "task": updated, "newly_unblocked": newly_unblocked}
+        ret: dict[str, Any] = {"success": True, "task": updated, "newly_unblocked": newly_unblocked}
         if updated and "_newly_unblocked_jobs" in updated:
-            result["newly_unblocked_jobs"] = updated.pop("_newly_unblocked_jobs")
+            ret["newly_unblocked_jobs"] = updated.pop("_newly_unblocked_jobs")
         if warning:
-            result["warning"] = warning
-        return _ok(**result)
+            ret["warning"] = warning
+        return _ok(**ret)
 
     if name == "fail_task":
         task_id = arguments["task_id"]
@@ -508,6 +650,13 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         if not job:
             return _err(f"Job '{job_id}' not found")
         tasks = store.get_tasks_for_job(conn, job_id)
+        blocked_tasks = resolver.get_blocking_reasons(conn, job_id)
+        blocked_map = {b["id"]: b["blocked_by"] for b in blocked_tasks}
+        for t in tasks:
+            if t["status"] == "pending" and t["id"] in blocked_map:
+                t["blocked_by"] = blocked_map[t["id"]]
+            else:
+                t["blocked_by"] = []
         progress = {
             "total": len(tasks),
             "completed": sum(1 for t in tasks if t["status"] == "completed"),
@@ -543,8 +692,22 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         result = store.cancel_job(conn, job_id)
         return _ok(success=True, **result)
 
+    if name == "pause_job":
+        job_id = arguments["job_id"]
+        job = store.pause_job(conn, job_id)
+        if job is None:
+            return _err(f"Job '{job_id}' not found")
+        return _ok(success=True, job=job)
+
+    if name == "resume_job":
+        job_id = arguments["job_id"]
+        job = store.resume_job(conn, job_id)
+        if job is None:
+            return _err(f"Job '{job_id}' not found")
+        return _ok(success=True, job=job)
+
     if name == "claim_next_action":
-        task = store.claim_next_action(conn, arguments["job_id"], arguments["agent_id"])
+        task = store.claim_next_action(conn, arguments["job_id"], arguments["agent_id"], arguments.get("repo"))
         return _ok(task=task)
 
     if name == "heartbeat_task":
@@ -586,6 +749,12 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
 
     if name == "set_job_concurrency":
         updated = store.set_job_concurrency(conn, arguments["job_id"], arguments.get("max_workers"))
+        if updated is None:
+            return _err(f"Job '{arguments['job_id']}' not found")
+        return _ok(success=True, job=updated)
+
+    if name == "set_worktree_paths":
+        updated = store.set_worktree_paths(conn, arguments["job_id"], arguments.get("paths", {}))
         if updated is None:
             return _err(f"Job '{arguments['job_id']}' not found")
         return _ok(success=True, job=updated)
@@ -648,10 +817,57 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         events = store.get_job_events(conn, job_id)
         return _ok(job_id=job_id, events=events)
 
+    if name == "get_blocked_tasks":
+        job_id = arguments["job_id"]
+        if not store.get_job(conn, job_id):
+            return _err(f"Job '{job_id}' not found")
+        blocked = resolver.get_blocking_reasons(conn, job_id)
+        return _ok(job_id=job_id, blocked_tasks=blocked)
+
+    if name == "requeue_task":
+        task_id = arguments["task_id"]
+        task = store.requeue_task(conn, task_id, arguments.get("input"))
+        if task is None:
+            return _err("Task not found or not in a requeue-able state (must be failed or cancelled)")
+        return _ok(success=True, task=task)
+
+    if name == "request_approval":
+        task_id = arguments["task_id"]
+        agent_id = arguments["agent_id"]
+        task = store.request_approval(conn, task_id, agent_id, arguments.get("notes"))
+        if task is None:
+            return _err("Task not found or not eligible for approval request (must be in_progress and owned by this agent)")
+        return _ok(success=True, task=task)
+
+    if name == "approve_task":
+        task_id = arguments["task_id"]
+        approver_id = arguments["approver_id"]
+        result = store.approve_task(conn, task_id, approver_id, arguments.get("notes"))
+        if result is None:
+            return _err("Task not found or not awaiting approval")
+        task = result["task"]
+        newly_unblocked = result["newly_unblocked"]
+        ret: dict[str, Any] = {"success": True, "task": task, "newly_unblocked": newly_unblocked}
+        if task and "_newly_unblocked_jobs" in task:
+            ret["newly_unblocked_jobs"] = task.pop("_newly_unblocked_jobs")
+        return _ok(**ret)
+
+    if name == "reject_task":
+        task_id = arguments["task_id"]
+        approver_id = arguments["approver_id"]
+        reason = arguments["reason"]
+        task = store.reject_task(conn, task_id, approver_id, reason)
+        if task is None:
+            return _err("Task not found or not awaiting approval")
+        return _ok(success=True, task=task)
+
     return _err(f"Unknown tool: {name}")
 
 
 async def _run():
+    conn = _conn()
+    store.startup_scan_awaiting_approval(conn)
+    conn.commit()
     async with stdio_server() as streams:
         await app.run(streams[0], streams[1], app.create_initialization_options())
 

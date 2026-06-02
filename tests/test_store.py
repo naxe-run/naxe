@@ -25,8 +25,8 @@ def test_create_and_get_job(conn):
 def test_list_jobs(conn):
     store.create_job(conn, "Job A")
     store.create_job(conn, "Job B")
-    jobs = store.list_jobs(conn)
-    assert len(jobs) == 2
+    result = store.list_jobs(conn)
+    assert len(result["jobs"]) == 2
 
 
 def test_add_tasks_lifecycle(conn):
@@ -437,3 +437,93 @@ def test_full_crud_lifecycle(conn):
 
     tasks = store.get_tasks_for_job(conn, job["id"])
     assert all(t["status"] == "completed" for t in tasks)
+
+
+# human_task auto-transition
+
+def test_human_task_auto_transitions_when_no_deps(conn):
+    job = store.create_job(conn, "human-no-deps")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Human step", "human_task": True}])
+    task = store.get_task(conn, "t1")
+    assert task["status"] == "awaiting_approval"
+
+
+def test_human_task_stays_pending_while_blocked(conn):
+    job = store.create_job(conn, "human-blocked")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t1", "name": "Agent step"},
+        {"id": "t2", "name": "Human step", "human_task": True, "depends_on": ["t1"]},
+    ])
+    assert store.get_task(conn, "t2")["status"] == "pending"
+    store.claim_task(conn, "t1", "agent-1")
+    store.complete_task(conn, "t1", "agent-1")
+    assert store.get_task(conn, "t2")["status"] == "awaiting_approval"
+
+
+# Agent cannot touch human tasks
+
+def test_claim_task_rejects_human_task(conn):
+    job = store.create_job(conn, "human-claim-task")
+    store.add_tasks(conn, job["id"], [
+        {"id": "gate", "name": "Gate"},
+        {"id": "h1", "name": "Human", "human_task": True, "depends_on": ["gate"]},
+    ])
+    # h1 is pending (blocked), not yet awaiting_approval
+    assert store.get_task(conn, "h1")["status"] == "pending"
+    result = store.claim_task(conn, "h1", "agent-1")
+    assert result is False
+
+
+def test_claim_next_action_skips_human_task(conn):
+    job = store.create_job(conn, "human-skip-cna")
+    store.add_tasks(conn, job["id"], [{"id": "h1", "name": "Human", "human_task": True}])
+    # h1 is awaiting_approval, so claim_next_action should return None
+    result = store.claim_next_action(conn, job["id"], "agent-1")
+    assert result is None
+
+
+def test_complete_task_rejects_human_task(conn):
+    job = store.create_job(conn, "human-complete-reject")
+    store.add_tasks(conn, job["id"], [{"id": "h1", "name": "Human", "human_task": True}])
+    # Force status back to pending to test the guard
+    conn.execute("UPDATE tasks SET status = 'pending' WHERE id = %s", ("h1",))
+    conn.commit()
+    result = store.complete_task(conn, "h1", "agent-1")
+    assert "error" in result
+    assert "human" in result["error"].lower()
+
+
+# requires_approval unaffected
+
+def test_requires_approval_does_not_auto_transition(conn):
+    job = store.create_job(conn, "req-approval-no-auto")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "requires_approval": True}])
+    task = store.get_task(conn, "t1")
+    assert task["status"] == "pending"
+
+
+def test_requires_approval_agent_flow_intact(conn):
+    job = store.create_job(conn, "req-approval-flow")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "requires_approval": True}])
+    store.claim_task(conn, "t1", "agent-1")
+    task = store.request_approval(conn, "t1", "agent-1", notes="please review")
+    assert task["status"] == "awaiting_approval"
+    result = store.approve_task(conn, "t1", "approver-x")
+    assert result is not None
+    assert result["task"]["status"] == "completed"
+
+
+# Startup scan
+
+def test_startup_scan_only_processes_human_tasks(conn):
+    job = store.create_job(conn, "startup-scan")
+    store.add_tasks(conn, job["id"], [
+        {"id": "ra", "name": "Requires approval", "requires_approval": True},
+        {"id": "ht", "name": "Human task", "human_task": True},
+    ])
+    # Force both back to pending to simulate pre-scan state
+    conn.execute("UPDATE tasks SET status = 'pending' WHERE job_id = %s", (job["id"],))
+    conn.commit()
+    store.startup_scan_awaiting_approval(conn)
+    assert store.get_task(conn, "ra")["status"] == "pending"
+    assert store.get_task(conn, "ht")["status"] == "awaiting_approval"
