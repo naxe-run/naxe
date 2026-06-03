@@ -6,6 +6,7 @@ Requires-Python: >=3.11
 Requires-Dist: mcp>=1.0.0
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: rich>=13.9.4
+Requires-Dist: textual>=0.52.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.23; extra == "dev"

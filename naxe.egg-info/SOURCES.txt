@@ -7,6 +7,7 @@ naxe/resolver.py
 naxe/schema.py
 naxe/server.py
 naxe/store.py
+naxe/tui.py
 naxe/watch.py
 naxe.egg-info/PKG-INFO
 naxe.egg-info/SOURCES.txt

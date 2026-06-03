@@ -1,4 +1,5 @@
 [console_scripts]
 naxe = naxe.server:main
 naxe-config = naxe.cli_config:main
+naxe-ui = naxe.tui:main
 naxe-watch = naxe.watch:main
