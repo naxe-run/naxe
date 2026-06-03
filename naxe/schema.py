@@ -200,6 +200,8 @@ def get_connection(url: str, readonly: bool = False):
     raw = sqlite3.connect(url, check_same_thread=False)
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA journal_mode=WAL")
+    raw.execute("PRAGMA busy_timeout=5000")
+    raw.execute("PRAGMA synchronous=NORMAL")
     raw.execute("PRAGMA foreign_keys=ON")
     conn = _SQLiteConnection(raw)
     if not readonly:

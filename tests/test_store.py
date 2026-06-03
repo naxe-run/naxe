@@ -118,6 +118,21 @@ def test_cancel_task_rejects_completed(conn):
     assert result is None
 
 
+def test_cancel_last_task_completes_job(conn):
+    job = store.create_job(conn, "cancel-last-task")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t1", "name": "Done"},
+        {"id": "t2", "name": "Skipped"},
+    ])
+    store.claim_task(conn, "t1", "agent-1")
+    store.update_task_status(conn, "t1", "completed")
+
+    store.cancel_task(conn, "t2")
+
+    job = store.get_job(conn, job["id"])
+    assert job["status"] == "completed"
+
+
 def test_cancel_job_cancels_all_non_terminal_tasks(conn):
     job = store.create_job(conn, "cancel-job")
     store.add_tasks(conn, job["id"], [

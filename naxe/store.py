@@ -17,7 +17,6 @@ def create_job(conn, name: str, max_workers: int | None = None, worktree: bool =
         "INSERT INTO jobs (id, name, created_at, status, max_workers, worktree) VALUES (%s, %s, %s, 'active', %s, %s)",
         (job_id, name, _now(), max_workers, int(worktree)),
     )
-    conn.commit()
     return _row(conn.execute("SELECT * FROM jobs WHERE id = %s", (job_id,)).fetchone())
 
 
@@ -26,7 +25,6 @@ def set_job_concurrency(conn, job_id: str, max_workers: int | None) -> dict | No
     if not get_job(conn, job_id):
         return None
     conn.execute("UPDATE jobs SET max_workers = %s WHERE id = %s", (max_workers, job_id))
-    conn.commit()
     return get_job(conn, job_id)
 
 
@@ -37,7 +35,6 @@ def set_worktree_paths(conn, job_id: str, paths: dict) -> dict | None:
         "UPDATE jobs SET worktree_paths = %s WHERE id = %s",
         (json.dumps(paths) if paths else None, job_id),
     )
-    conn.commit()
     return get_job(conn, job_id)
 
 
@@ -106,31 +103,30 @@ def add_tasks(conn, job_id: str, tasks: list[dict]) -> list[str]:
 
     now = _now()
     task_ids = []
-    with conn.transaction():
-        for t in tasks:
-            tid = t["_resolved_id"]
-            resources = t.get("resources")
+    for t in tasks:
+        tid = t["_resolved_id"]
+        resources = t.get("resources")
+        conn.execute(
+            """INSERT INTO tasks
+               (id, job_id, name, description, status, duration_minutes, max_retries, input,
+                resources, priority, repo, requires_approval, human_task, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                tid, job_id, t["name"], t.get("description"),
+                t.get("duration_minutes"), t.get("max_retries", 0), t.get("input"),
+                json.dumps(resources) if resources is not None else None,
+                t.get("priority", 50), t.get("repo"),
+                1 if t.get("requires_approval") else 0,
+                1 if t.get("human_task") else 0,
+                now, now,
+            ),
+        )
+        for dep in t.get("depends_on", []) or []:
             conn.execute(
-                """INSERT INTO tasks
-                   (id, job_id, name, description, status, duration_minutes, max_retries, input,
-                    resources, priority, repo, requires_approval, human_task, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    tid, job_id, t["name"], t.get("description"),
-                    t.get("duration_minutes"), t.get("max_retries", 0), t.get("input"),
-                    json.dumps(resources) if resources is not None else None,
-                    t.get("priority", 50), t.get("repo"),
-                    1 if t.get("requires_approval") else 0,
-                    1 if t.get("human_task") else 0,
-                    now, now,
-                ),
+                "INSERT INTO dependencies (task_id, depends_on_task_id) VALUES (%s, %s)",
+                (tid, dep),
             )
-            for dep in t.get("depends_on", []) or []:
-                conn.execute(
-                    "INSERT INTO dependencies (task_id, depends_on_task_id) VALUES (%s, %s)",
-                    (tid, dep),
-                )
-            task_ids.append(tid)
+        task_ids.append(tid)
 
     for tid in task_ids:
         log_event(conn, tid, job_id, "created")
@@ -146,7 +142,6 @@ def _auto_transition_to_awaiting_approval(conn, task_id: str, job_id: str) -> No
     """For any newly-unblocked tasks with human_task=1, auto-transition to awaiting_approval."""
     task = get_task(conn, task_id)
     if not task or task.get("human_task") != 1 or task.get("status") != "pending":
-        conn.rollback()
         return
     deps = conn.execute(
         "SELECT depends_on_task_id FROM dependencies WHERE task_id = %s",
@@ -160,14 +155,12 @@ def _auto_transition_to_awaiting_approval(conn, task_id: str, job_id: str) -> No
             dep_ids,
         ).fetchone()["cnt"]
         if completed != len(dep_ids):
-            conn.rollback()
             return
     now = _now()
     conn.execute(
         "UPDATE tasks SET status = 'awaiting_approval', updated_at = %s WHERE id = %s AND status = 'pending'",
         (now, task_id),
     )
-    conn.commit()
     log_event(conn, task_id, job_id, "awaiting_approval")
 
 
@@ -210,7 +203,6 @@ def claim_task(conn, task_id: str, agent_id: str) -> bool:
            WHERE id = %s AND status = 'pending' AND owner_agent_id IS NULL""",
         (agent_id, now, task_id),
     )
-    conn.commit()
     claimed = cur.rowcount == 1
     if claimed:
         task = get_task(conn, task_id)
@@ -303,7 +295,6 @@ def claim_next_action(conn, job_id: str, agent_id: str, repo: str | None = None)
            WHERE id = %s AND status = 'pending' AND owner_agent_id IS NULL""",
         (agent_id, now, task["id"]),
     )
-    conn.commit()
 
     if cur.rowcount == 0:
         return None
@@ -319,22 +310,35 @@ def claim_next_action(conn, job_id: str, agent_id: str, repo: str | None = None)
 
 
 def cancel_task(conn, task_id: str) -> dict | None:
-    """Cancel a single task. Only works on pending or in_progress tasks.
+    """Cancel a single task. Works on pending, in_progress, and awaiting_approval (human tasks) tasks.
 
     Returns the updated task, or None if the task doesn't exist or is already terminal.
     """
+    task = get_task(conn, task_id)
+    if not task:
+        return None
+    cancellable = task["status"] in ("pending", "in_progress") or (
+        task["status"] == "awaiting_approval" and bool(task.get("human_task"))
+    )
+    if not cancellable:
+        return None
     now = _now()
     cur = conn.execute(
-        """UPDATE tasks SET status = 'cancelled', updated_at = %s
-           WHERE id = %s AND status IN ('pending', 'in_progress')""",
+        "UPDATE tasks SET status = 'cancelled', updated_at = %s WHERE id = %s",
         (now, task_id),
     )
-    conn.commit()
     if cur.rowcount == 0:
         return None
     task = get_task(conn, task_id)
     if task:
         log_event(conn, task_id, task["job_id"], "cancelled")
+        job_id = task["job_id"]
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM tasks WHERE job_id = %s AND status NOT IN ('completed', 'cancelled')",
+            (job_id,),
+        ).fetchone()["cnt"]
+        if remaining == 0:
+            update_job_status(conn, job_id, "completed")
     return task
 
 
@@ -344,23 +348,23 @@ def cancel_job(conn, job_id: str) -> dict:
     Returns a dict with the updated job and count of tasks cancelled.
     """
     now = _now()
+    non_terminal = ('pending', 'in_progress', 'awaiting_approval')
     to_cancel = [
         r["id"]
         for r in conn.execute(
-            "SELECT id FROM tasks WHERE job_id = %s AND status IN ('pending', 'in_progress')",
-            (job_id,),
+            f"SELECT id FROM tasks WHERE job_id = %s AND status IN ({','.join(['%s']*len(non_terminal))})",
+            (job_id, *non_terminal),
         ).fetchall()
     ]
-    with conn.transaction():
-        conn.execute(
-            "UPDATE jobs SET status = 'cancelled' WHERE id = %s",
-            (job_id,),
-        )
-        cur = conn.execute(
-            """UPDATE tasks SET status = 'cancelled', updated_at = %s
-               WHERE job_id = %s AND status IN ('pending', 'in_progress')""",
-            (now, job_id),
-        )
+    conn.execute(
+        "UPDATE jobs SET status = 'cancelled' WHERE id = %s",
+        (job_id,),
+    )
+    cur = conn.execute(
+        f"""UPDATE tasks SET status = 'cancelled', updated_at = %s
+           WHERE job_id = %s AND status IN ({','.join(['%s']*len(non_terminal))})""",
+        (now, job_id, *non_terminal),
+    )
     tasks_cancelled = cur.rowcount
     job = get_job(conn, job_id)
     for task_id in to_cancel:
@@ -372,7 +376,6 @@ def pause_job(conn, job_id: str) -> dict | None:
     if not get_job(conn, job_id):
         return None
     conn.execute("UPDATE jobs SET paused = 1 WHERE id = %s", (job_id,))
-    conn.commit()
     return get_job(conn, job_id)
 
 
@@ -380,7 +383,6 @@ def resume_job(conn, job_id: str) -> dict | None:
     if not get_job(conn, job_id):
         return None
     conn.execute("UPDATE jobs SET paused = 0 WHERE id = %s", (job_id,))
-    conn.commit()
     return get_job(conn, job_id)
 
 
@@ -413,7 +415,6 @@ def reclaim_stale_tasks(conn, job_id: str) -> list[dict]:
             (now, task_id),
         )
         reclaimed.append(get_task(conn, task_id))
-    conn.commit()
     result = [t for t in reclaimed if t]
     for t in result:
         log_event(conn, t["id"], job_id, "reclaimed")
@@ -427,7 +428,6 @@ def heartbeat_task(conn, task_id: str, agent_id: str) -> dict | None:
         "UPDATE tasks SET last_heartbeat_at = %s, updated_at = %s WHERE id = %s AND owner_agent_id = %s",
         (now, now, task_id, agent_id),
     )
-    conn.commit()
     if cur.rowcount == 0:
         return None
     return get_task(conn, task_id)
@@ -447,7 +447,6 @@ def update_task_progress(conn, task_id: str, agent_id: str, progress: int) -> di
         "UPDATE tasks SET progress = %s, updated_at = %s WHERE id = %s",
         (progress, now, task_id),
     )
-    conn.commit()
     return get_task(conn, task_id)
 
 
@@ -490,7 +489,6 @@ def retry_task(conn, task_id: str) -> dict | None:
            WHERE id = %s""",
         (now, task_id),
     )
-    conn.commit()
     task = get_task(conn, task_id)
     if task:
         log_event(conn, task_id, task["job_id"], "retried")
@@ -521,7 +519,6 @@ def requeue_task(conn, task_id: str, input=None) -> dict | None:
                WHERE id = %s""",
             (now, task_id),
         )
-    conn.commit()
     task = get_task(conn, task_id)
     if task:
         log_event(conn, task_id, task["job_id"], "requeued")
@@ -541,7 +538,6 @@ def request_approval(conn, task_id: str, agent_id: str, notes: str | None = None
         "UPDATE tasks SET status = 'awaiting_approval', approval_notes = %s, updated_at = %s WHERE id = %s",
         (notes, now, task_id),
     )
-    conn.commit()
     log_event(conn, task_id, task["job_id"], "approval_requested", agent_id)
     return get_task(conn, task_id)
 
@@ -560,7 +556,6 @@ def approve_task(conn, task_id: str, approver_id: str, notes: str | None = None)
            updated_at = %s WHERE id = %s AND status = 'awaiting_approval'""",
         (approver_id, notes, now, task_id),
     )
-    conn.commit()
     if cur.rowcount == 0:
         return None
     task = get_task(conn, task_id)
@@ -594,7 +589,6 @@ def reject_task(conn, task_id: str, approver_id: str, reason: str) -> dict | Non
            updated_at = %s WHERE id = %s AND status = 'awaiting_approval'""",
         (approver_id, reason, now, task_id),
     )
-    conn.commit()
     task = get_task(conn, task_id)
     log_event(conn, task_id, task["job_id"], "rejected", approver_id)
     retry_task(conn, task_id)
@@ -639,10 +633,8 @@ def update_task_status(
             "UPDATE tasks SET status = %s, updated_at = %s WHERE id = %s",
             (status, now, task_id),
         )
-    conn.commit()
     task = get_task(conn, task_id)
     if task and status in ("completed", "failed"):
-        log_event(conn, task_id, task["job_id"], status, agent_id)
         if status == "completed":
             job_id = task["job_id"]
             remaining = conn.execute(
@@ -661,6 +653,7 @@ def update_task_status(
                 ) or None
                 update_job_status(conn, job_id, "completed", job_output)
                 task["_newly_unblocked_jobs"] = _get_newly_unblocked_jobs(conn, job_id)
+        log_event(conn, task_id, task["job_id"], status, agent_id)
     return task
 
 
@@ -687,7 +680,6 @@ def add_job_dependency(conn, job_id: str, depends_on_job_id: str) -> None:
         "INSERT INTO job_dependencies (job_id, depends_on_job_id) VALUES (%s, %s)",
         (job_id, depends_on_job_id),
     )
-    conn.commit()
 
 
 def update_job_status(conn, job_id: str, status: str, output: str | None = None) -> dict | None:
@@ -700,7 +692,6 @@ def update_job_status(conn, job_id: str, status: str, output: str | None = None)
         )
     else:
         conn.execute("UPDATE jobs SET status = %s WHERE id = %s", (status, job_id))
-    conn.commit()
     return get_job(conn, job_id)
 
 
@@ -726,14 +717,14 @@ def edit_job(conn, job_id: str, name: str) -> dict | None:
     if not get_job(conn, job_id):
         return None
     conn.execute("UPDATE jobs SET name = %s WHERE id = %s", (name, job_id))
-    conn.commit()
     return get_job(conn, job_id)
 
 
 def edit_task(conn, task_id: str, updates: dict) -> dict | None:
-    """Edit metadata and/or dependencies of a pending task.
+    """Edit metadata and/or dependencies of a task.
 
-    Only pending tasks may be edited. Fields absent from `updates` are left unchanged.
+    Editable when pending (any task) or awaiting_approval (human tasks only).
+    Fields absent from `updates` are left unchanged.
     If `depends_on` is present it replaces all existing dependencies; a cycle check is
     run against the full job graph before committing.
 
@@ -743,61 +734,65 @@ def edit_task(conn, task_id: str, updates: dict) -> dict | None:
     from naxe import resolver as _resolver
 
     task = get_task(conn, task_id)
-    if not task or task["status"] != "pending":
+    if not task:
+        return None
+    editable = task["status"] == "pending" or (
+        task["status"] == "awaiting_approval" and bool(task.get("human_task"))
+    )
+    if not editable:
         return None
 
     job_id = task["job_id"]
 
-    with conn.transaction():
-        if "depends_on" in updates:
-            new_deps = list(updates["depends_on"] or [])
-            all_ids = {
-                r["id"]
-                for r in conn.execute("SELECT id FROM tasks WHERE job_id = %s", (job_id,)).fetchall()
-            }
-            for dep in new_deps:
-                if dep not in all_ids:
-                    raise ValueError(f"Unknown dependency '{dep}'")
+    if "depends_on" in updates:
+        new_deps = list(updates["depends_on"] or [])
+        all_ids = {
+            r["id"]
+            for r in conn.execute("SELECT id FROM tasks WHERE job_id = %s", (job_id,)).fetchall()
+        }
+        for dep in new_deps:
+            if dep not in all_ids:
+                raise ValueError(f"Unknown dependency '{dep}'")
 
-            # Build full job graph with proposed deps for this task, check for cycles
-            existing_deps = conn.execute(
-                "SELECT task_id, depends_on_task_id FROM dependencies "
-                "WHERE task_id IN (SELECT id FROM tasks WHERE job_id = %s)",
-                (job_id,),
-            ).fetchall()
-            graph: dict[str, list[str]] = {tid: [] for tid in all_ids}
-            for d in existing_deps:
-                if d["task_id"] != task_id:
-                    graph[d["task_id"]].append(d["depends_on_task_id"])
-            graph[task_id] = new_deps
-            batch = [{"_resolved_id": tid, "depends_on": deps} for tid, deps in graph.items()]
-            if _resolver.detect_cycle(batch):
-                raise ValueError("Dependency change would create a cycle")
+        # Build full job graph with proposed deps for this task, check for cycles
+        existing_deps = conn.execute(
+            "SELECT task_id, depends_on_task_id FROM dependencies "
+            "WHERE task_id IN (SELECT id FROM tasks WHERE job_id = %s)",
+            (job_id,),
+        ).fetchall()
+        graph: dict[str, list[str]] = {tid: [] for tid in all_ids}
+        for d in existing_deps:
+            if d["task_id"] != task_id:
+                graph[d["task_id"]].append(d["depends_on_task_id"])
+        graph[task_id] = new_deps
+        batch = [{"_resolved_id": tid, "depends_on": deps} for tid, deps in graph.items()]
+        if _resolver.detect_cycle(batch):
+            raise ValueError("Dependency change would create a cycle")
 
-            conn.execute("DELETE FROM dependencies WHERE task_id = %s", (task_id,))
-            for dep in new_deps:
-                conn.execute(
-                    "INSERT INTO dependencies (task_id, depends_on_task_id) VALUES (%s, %s)",
-                    (task_id, dep),
-                )
+        conn.execute("DELETE FROM dependencies WHERE task_id = %s", (task_id,))
+        for dep in new_deps:
+            conn.execute(
+                "INSERT INTO dependencies (task_id, depends_on_task_id) VALUES (%s, %s)",
+                (task_id, dep),
+            )
 
-        editable = ("name", "description", "resources", "duration_minutes", "input", "max_retries")
-        set_parts = []
-        params = []
-        for field in editable:
-            if field in updates:
-                val = updates[field]
-                if field == "resources":
-                    val = json.dumps(val) if val is not None else None
-                set_parts.append(f"{field} = %s")
-                params.append(val)
+    editable = ("name", "description", "resources", "duration_minutes", "input", "max_retries")
+    set_parts = []
+    params = []
+    for field in editable:
+        if field in updates:
+            val = updates[field]
+            if field == "resources":
+                val = json.dumps(val) if val is not None else None
+            set_parts.append(f"{field} = %s")
+            params.append(val)
 
-        if set_parts:
-            now = _now()
-            set_parts.append("updated_at = %s")
-            params.append(now)
-            params.append(task_id)
-            conn.execute(f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = %s", params)
+    if set_parts:
+        now = _now()
+        set_parts.append("updated_at = %s")
+        params.append(now)
+        params.append(task_id)
+        conn.execute(f"UPDATE tasks SET {', '.join(set_parts)} WHERE id = %s", params)
 
     return get_task(conn, task_id)
 
@@ -818,7 +813,6 @@ def create_template(conn, name: str, description: str | None, tasks: list[dict])
         "INSERT INTO job_templates (id, name, description, tasks_json, created_at) VALUES (%s, %s, %s, %s, %s)",
         (template_id, name, description, json.dumps(tasks), now),
     )
-    conn.commit()
     return _row(conn.execute("SELECT * FROM job_templates WHERE id = %s", (template_id,)).fetchone())
 
 
@@ -869,4 +863,3 @@ def log_event(
             json.dumps(details) if details is not None else None,
         ),
     )
-    conn.commit()

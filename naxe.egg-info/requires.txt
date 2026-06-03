@@ -1,6 +1,7 @@
 mcp>=1.0.0
 pyyaml>=6.0
 rich>=13.9.4
+textual>=0.52.0
 
 [dev]
 pytest>=8.0
