@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server import Server
@@ -72,12 +73,13 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Add tasks with explicit dependencies to a job. Define the full dependency graph up "
                 "front using depends_on. Naxe will enforce execution order — you do not need to "
-                "track this yourself. Rejects cycles and unknown dependency IDs."
+                "track this yourself. Rejects cycles and unknown dependency IDs. "
+                "job_id is optional — if omitted, a new job is auto-created using the first task's name."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "job_id": {"type": "string"},
+                    "job_id": {"type": "string", "description": "Full job UUID or a unique ID prefix (e.g. first 8 chars). Optional — if omitted, a new job is created automatically."},
                     "tasks": {
                         "type": "array",
                         "items": {
@@ -86,7 +88,7 @@ async def list_tools() -> list[Tool]:
                                 "id": {"type": "string", "description": "Stable caller-defined ID (e.g. 't1')"},
                                 "name": {"type": "string"},
                                 "description": {"type": "string", "description": "Detail to guide execution"},
-                                "duration_minutes": {"type": "integer", "description": "Tasks ≤5 min are flagged as quick wins"},
+                                "duration_minutes": {"type": "integer"},
                                 "depends_on": {"type": "array", "items": {"type": "string"}, "description": "IDs of tasks that must complete first"},
                                 "max_retries": {"type": "integer", "description": "Number of times to retry this task on failure (default 0)"},
                                 "input": {"type": "string", "description": "Structured input data for the task (passed through to task record)"},
@@ -95,12 +97,16 @@ async def list_tools() -> list[Tool]:
                                 "priority": {"type": "integer", "description": "Task priority 0–100 (default 50). Higher values are claimed first by claim_next_action."},
                                 "requires_approval": {"type": "boolean", "description": "Set to true if this task must go through the approval flow (request_approval → approve_task) before it can be completed. An agent that tries to call complete_task directly on a requires_approval task will receive an error and must call request_approval first. Use this for tasks involving irreversible actions, external communication, financial operations, or anything requiring human sign-off."},
                                 "human_task": {"type": "boolean", "description": "Set to true for tasks performed entirely by a human, not an agent. Human tasks are never claimable by agents. When all dependencies complete, the task auto-transitions to awaiting_approval. A human confirms completion via approve_task or rejects via reject_task. Use requires_approval for agent-executed tasks that need human sign-off; use human_task for tasks the agent will not perform at all."},
+                                "start_date": {"type": "string", "description": "ISO 8601 datetime before which this task is invisible to agents — not surfaced by get_next_actions or claim_next_action."},
+                                "due_date": {"type": "string", "description": "ISO 8601 deadline for this task. Stored and surfaced in task records; no automatic enforcement."},
+                                "recurrence_interval_days": {"type": "integer", "description": "If set, completing this task automatically spawns a new job containing a copy of this task, with start_date offset by this many days into the future."},
+                                "critical": {"type": "boolean", "description": "If true, this task sorts above all non-critical tasks regardless of priority. Sort order: critical DESC, priority DESC, created_at ASC."},
                             },
                             "required": ["name"],
                         },
                     },
                 },
-                "required": ["job_id", "tasks"],
+                "required": ["tasks"],
             },
         ),
         Tool(
@@ -108,7 +114,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 "REQUIRED: Call this to find out what to work on next. Returns only tasks that are "
                 "fully unblocked right now — all their dependencies are complete. Always use this "
-                "instead of deciding task order yourself. Includes is_quick_win flag and "
+                "instead of deciding task order yourself. Includes "
                 "unblocked_by context showing what just became available."
             ),
             inputSchema={
@@ -179,11 +185,12 @@ async def list_tools() -> list[Tool]:
                 "Full snapshot of a job: all tasks with statuses, ownership, and progress counters "
                 "(total/completed/in_progress/pending/failed). Task records include both input "
                 "(structured task data) and output (result written by the agent). Use to check "
-                "overall progress or audit what has and hasn't been done."
+                "overall progress or audit what has and hasn't been done. "
+                "job_id accepts a full UUID or a unique prefix (e.g. the first 8 chars of the ID)."
             ),
             inputSchema={
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}},
+                "properties": {"job_id": {"type": "string", "description": "Full job UUID or a unique ID prefix (e.g. first 8 chars)"}},
                 "required": ["job_id"],
             },
         ),
@@ -225,7 +232,10 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {"job_id": {"type": "string"}},
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Optional reason for pausing this job. Stored on the job and shown in the TUI."},
+                },
                 "required": ["job_id"],
             },
         ),
@@ -296,12 +306,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_jobs",
-            description="List all jobs with per-job progress summaries. Supports pagination via limit and offset.",
+            description="List all jobs with per-job progress summaries. Supports pagination and prefix filtering. Pass id_prefix (e.g. the first 8 chars of a job ID) to narrow results to matching jobs.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "Max jobs to return (default 50)"},
                     "offset": {"type": "integer", "description": "Number of jobs to skip (default 0)"},
+                    "id_prefix": {"type": "string", "description": "Filter jobs whose ID starts with this prefix (e.g. first 8 chars of a short ID)"},
                 },
             },
         ),
@@ -371,6 +382,10 @@ async def list_tools() -> list[Tool]:
                     "duration_minutes": {"type": "integer"},
                     "max_retries": {"type": "integer"},
                     "input": {"type": "string"},
+                    "start_date": {"type": "string", "description": "ISO 8601 datetime before which this task is invisible to agents — not surfaced by get_next_actions or claim_next_action."},
+                    "due_date": {"type": "string", "description": "ISO 8601 deadline for this task. Stored and surfaced in task records; no automatic enforcement."},
+                    "recurrence_interval_days": {"type": "integer", "description": "If set, completing this task automatically spawns a new job containing a copy of this task, with start_date offset by this many days into the future."},
+                    "critical": {"type": "boolean", "description": "If true, this task sorts above all non-critical tasks regardless of priority. Sort order: critical DESC, priority DESC, created_at ASC."},
                 },
                 "required": ["task_id"],
             },
@@ -571,7 +586,7 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         return _ok(job_id=job["id"], job=job)
 
     if name == "add_tasks":
-        job_id = arguments["job_id"]
+        job_id = arguments.get("job_id")
         tasks = arguments["tasks"]
 
         # Assign resolved IDs before cycle check
@@ -585,14 +600,17 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
             return _err("Dependency cycle detected in task batch — no tasks were added.")
 
         try:
-            task_ids = store.add_tasks(conn, job_id, tasks)
+            result = store.add_tasks(conn, job_id, tasks)
         except ValueError as e:
             return _err(str(e))
 
-        return _ok(added=len(task_ids), task_ids=task_ids)
+        return _ok(added=len(result["task_ids"]), task_ids=result["task_ids"], job_id=result["job_id"])
 
     if name == "get_next_actions":
-        actions = resolver.get_next_actions(conn, arguments["job_id"], arguments.get("repo"))
+        job = store.get_job(conn, arguments["job_id"])
+        if not job:
+            return _err(f"Job '{arguments['job_id']}' not found")
+        actions = resolver.get_next_actions(conn, job["id"], arguments.get("repo"))
         return _ok(next_actions=actions)
 
     if name == "claim_task":
@@ -621,6 +639,8 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
             ret["newly_unblocked_jobs"] = updated.pop("_newly_unblocked_jobs")
         if warning:
             ret["warning"] = warning
+        if result.get("recurrence_spawned"):
+            ret["recurrence_spawned"] = result["recurrence_spawned"]
         return _ok(**ret)
 
     if name == "fail_task":
@@ -645,10 +665,10 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         return _ok(**result)
 
     if name == "get_job_status":
-        job_id = arguments["job_id"]
-        job = store.get_job(conn, job_id)
+        job = store.get_job(conn, arguments["job_id"])
         if not job:
-            return _err(f"Job '{job_id}' not found")
+            return _err(f"Job '{arguments['job_id']}' not found")
+        job_id = job["id"]
         tasks = store.get_tasks_for_job(conn, job_id)
         blocked_tasks = resolver.get_blocking_reasons(conn, job_id)
         blocked_map = {b["id"]: b["blocked_by"] for b in blocked_tasks}
@@ -657,6 +677,17 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
                 t["blocked_by"] = blocked_map[t["id"]]
             else:
                 t["blocked_by"] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for t in tasks:
+            status = t["status"]
+            if status == "pending" and t["id"] in blocked_map:
+                t["display_status"] = "waiting_on"
+            elif status == "pending" and t.get("start_date") and t["start_date"] > now_iso:
+                t["display_status"] = "scheduled"
+            elif status == "pending":
+                t["display_status"] = "next_action"
+            else:
+                t["display_status"] = status
         progress = {
             "total": len(tasks),
             "completed": sum(1 for t in tasks if t["status"] == "completed"),
@@ -694,7 +725,7 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
 
     if name == "pause_job":
         job_id = arguments["job_id"]
-        job = store.pause_job(conn, job_id)
+        job = store.pause_job(conn, job_id, reason=arguments.get("reason"))
         if job is None:
             return _err(f"Job '{job_id}' not found")
         return _ok(success=True, job=job)
@@ -725,7 +756,8 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
     if name == "list_jobs":
         limit = arguments.get("limit", 50)
         offset = arguments.get("offset", 0)
-        page = store.list_jobs(conn, limit=limit, offset=offset)
+        id_prefix = arguments.get("id_prefix")
+        page = store.list_jobs(conn, limit=limit, offset=offset, id_prefix=id_prefix)
         result = []
         for job in page["jobs"]:
             tasks = store.get_tasks_for_job(conn, job["id"])
@@ -811,18 +843,18 @@ async def _handle_tool(name: str, arguments: dict[str, Any], conn) -> list[TextC
         return _ok(task_id=task_id, events=events)
 
     if name == "get_job_audit_trail":
-        job_id = arguments["job_id"]
-        if not store.get_job(conn, job_id):
-            return _err(f"Job '{job_id}' not found")
-        events = store.get_job_events(conn, job_id)
-        return _ok(job_id=job_id, events=events)
+        job = store.get_job(conn, arguments["job_id"])
+        if not job:
+            return _err(f"Job '{arguments['job_id']}' not found")
+        events = store.get_job_events(conn, job["id"])
+        return _ok(job_id=job["id"], events=events)
 
     if name == "get_blocked_tasks":
-        job_id = arguments["job_id"]
-        if not store.get_job(conn, job_id):
-            return _err(f"Job '{job_id}' not found")
-        blocked = resolver.get_blocking_reasons(conn, job_id)
-        return _ok(job_id=job_id, blocked_tasks=blocked)
+        job = store.get_job(conn, arguments["job_id"])
+        if not job:
+            return _err(f"Job '{arguments['job_id']}' not found")
+        blocked = resolver.get_blocking_reasons(conn, job["id"])
+        return _ok(job_id=job["id"], blocked_tasks=blocked)
 
     if name == "requeue_task":
         task_id = arguments["task_id"]

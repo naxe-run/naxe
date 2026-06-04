@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+
 def detect_cycle(tasks: list[dict]) -> bool:
     """
     Check proposed task batch for dependency cycles using DFS.
@@ -34,11 +37,17 @@ def get_next_actions(conn, job_id: str, repo: str | None = None) -> list[dict]:
     If repo is provided, only tasks with that repo or no repo (NULL) are returned.
     """
     pending = conn.execute(
-        "SELECT * FROM tasks WHERE job_id = %s AND status = 'pending'",
+        "SELECT * FROM tasks WHERE job_id = %s AND status = 'pending' ORDER BY critical DESC, priority DESC, created_at ASC",
         (job_id,),
     ).fetchall()
     if repo is not None:
         pending = [t for t in pending if t.get("repo") is None or t.get("repo") == repo]
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    pending = [
+        t for t in pending
+        if not (t.get("start_date") and t["start_date"] > now_iso)
+    ]
 
     result = []
     for task in pending:
@@ -58,13 +67,12 @@ def get_next_actions(conn, job_id: str, repo: str | None = None) -> list[dict]:
 
         if unblocked:
             t = dict(task)
-            dm = t.get("duration_minutes")
-            t["is_quick_win"] = dm is not None and dm <= 5
             # Include names of completed deps that unblocked this task
             t["unblocked_by"] = [
                 {"id": r["depends_on_task_id"], "name": r["name"]}
                 for r in deps
             ]
+            t["display_status"] = "next_action"
             result.append(t)
 
     return result

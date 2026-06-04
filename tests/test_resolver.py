@@ -45,7 +45,7 @@ def test_completing_dep_unblocks_task(conn):
     assert [a["id"] for a in actions] == ["t2"]
 
 
-def test_quick_win_flag(conn):
+def test_get_next_actions_returns_display_status(conn):
     job = store.create_job(conn, "test")
     store.add_tasks(conn, job["id"], [
         {"id": "t1", "name": "Quick", "duration_minutes": 5},
@@ -53,10 +53,9 @@ def test_quick_win_flag(conn):
         {"id": "t3", "name": "No duration"},
     ])
     actions = resolver.get_next_actions(conn, job["id"])
-    by_id = {a["id"]: a for a in actions}
-    assert by_id["t1"]["is_quick_win"] is True
-    assert by_id["t2"]["is_quick_win"] is False
-    assert by_id["t3"]["is_quick_win"] is False
+    for a in actions:
+        assert a.get("display_status") == "next_action"
+        assert "is_quick_win" not in a
 
 
 def test_detect_cycle_direct(conn):
@@ -155,3 +154,39 @@ def test_complex_10_task_graph(conn):
 
     store.update_task_status(conn, "t11", "completed")
     assert next_ids() == set()
+
+
+def test_get_next_actions_critical_first(conn):
+    job = store.create_job(conn, "critical-resolver")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t-normal", "name": "Normal", "priority": 100},
+        {"id": "t-critical", "name": "Critical", "priority": 50, "critical": True},
+    ])
+    actions = resolver.get_next_actions(conn, job["id"])
+    assert len(actions) >= 2
+    assert actions[0]["id"] == "t-critical"
+    assert "is_quick_win" not in actions[0]
+
+
+def test_display_status_next_action_on_unblocked_pending(conn):
+    from naxe import resolver
+    job = store.create_job(conn, "ds-next-action")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task"}])
+    actions = resolver.get_next_actions(conn, job["id"])
+    assert len(actions) == 1
+    assert actions[0]["display_status"] == "next_action"
+
+
+def test_display_status_not_on_blocked_task(conn):
+    from naxe import resolver
+    job = store.create_job(conn, "ds-blocked")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t1", "name": "Gate"},
+        {"id": "t2", "name": "Blocked", "depends_on": ["t1"]},
+    ])
+    actions = resolver.get_next_actions(conn, job["id"])
+    ids = [a["id"] for a in actions]
+    assert "t1" in ids
+    assert "t2" not in ids  # blocked, not returned
+    for a in actions:
+        assert a["display_status"] == "next_action"

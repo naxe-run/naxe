@@ -199,6 +199,9 @@ _STATUS_STYLE: dict[str, str] = {
     "failed":            _C_FAILED,
     "cancelled":         _C_CANCELLED,
     "awaiting_approval": _C_HUMAN,
+    "next_action":       "dim",
+    "waiting_on":        _C_PENDING,
+    "scheduled":         "dim",
 }
 
 
@@ -209,6 +212,9 @@ def _rebuild_status_style() -> None:
     _STATUS_STYLE["failed"]            = _C_FAILED
     _STATUS_STYLE["cancelled"]         = _C_CANCELLED
     _STATUS_STYLE["awaiting_approval"] = _C_HUMAN
+    _STATUS_STYLE["next_action"]       = "dim"
+    _STATUS_STYLE["waiting_on"]        = _C_PENDING
+    _STATUS_STYLE["scheduled"]         = "dim"
 
 _STATUS_SYMBOL: dict[str, str] = {
     "pending": "○",
@@ -217,6 +223,9 @@ _STATUS_SYMBOL: dict[str, str] = {
     "failed": "✗",
     "cancelled": "⊘",
     "awaiting_approval": "⧗",
+    "next_action": "▶",
+    "waiting_on":  "⊟",
+    "scheduled":   "⏱",
 }
 
 
@@ -248,6 +257,29 @@ def _relative_time(ts: str | None) -> str:
         return f"{s // 86400}d ago"
     except Exception:
         return str(ts)
+
+
+def _fmt_due_date(ts: str | None) -> tuple[str, bool]:
+    """Returns (formatted date string, is_overdue). Returns ('', False) when null."""
+    if not ts:
+        return "", False
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        is_overdue = dt.astimezone(timezone.utc) < datetime.now(timezone.utc)
+        label = dt.strftime("%b ") + str(dt.day)
+        return label, is_overdue
+    except Exception:
+        return str(ts), False
+
+
+def _compute_display_status(task: dict, blocked_ids: set, now_iso: str) -> str:
+    if task["id"] in blocked_ids:
+        return "waiting_on"
+    if task.get("start_date") and task["start_date"] > now_iso:
+        return "scheduled"
+    if task["status"] == "pending":
+        return "next_action"
+    return task["status"]
 
 
 def _progress_bar(pct: int, width: int = 16) -> str:
@@ -283,6 +315,7 @@ def _batch_task_counts(conn, job_ids: list[str]) -> dict[str, dict[str, int]]:
 
 def _task_label(task: dict) -> Text:
     status = task["status"]
+    display_status = task.get("display_status", status)
     is_human = bool(task.get("human_task"))
     req_approval = bool(task.get("requires_approval"))
 
@@ -293,10 +326,12 @@ def _task_label(task: dict) -> Text:
     elif req_approval and status == "pending":
         symbol, style = "⧗", _C_PENDING
     else:
-        symbol = _STATUS_SYMBOL.get(status, "●")
-        style = _STATUS_STYLE.get(status, "")
+        symbol = _STATUS_SYMBOL.get(display_status, "●")
+        style = _STATUS_STYLE.get(display_status, "")
 
     t = Text(overflow="ellipsis", no_wrap=True)
+    if task.get("critical"):
+        t.append("! ", style=_C_FAILED)
     t.append(f"{symbol} ", style=style)
     t.append(task["name"], style=style)
     t.append(f"  [{task['id'][:8]}]", style="dim")
@@ -305,6 +340,12 @@ def _task_label(task: dict) -> Text:
     if status == "in_progress" and task.get("progress"):
         p = int(task["progress"])
         t.append(f"  [{_progress_bar(p, 8)}] {p}%", style=_C_RUNNING)
+    due_label, overdue = _fmt_due_date(task.get("due_date"))
+    if due_label:
+        t.append(f"  {due_label}", style=_C_FAILED if overdue else "dim")
+    n = task.get("recurrence_interval_days")
+    if n:
+        t.append(f"  ↻{n}d", style="dim")
     return t
 
 
@@ -348,12 +389,18 @@ def _render_task_detail(task: dict | None, events: list[dict]) -> str:
     def row(key: str, val: str) -> str:
         return f"[dim]{key}:[/dim]  {val}"
 
+    display_status = task.get("display_status")
+    if display_status and display_status != task["status"]:
+        lines.append(row("State", display_status.replace("_", " ")))
+
     if task.get("owner_agent_id"):
         lines.append(row("Agent", f"[{_C_RUNNING}]{escape(task['owner_agent_id'])}[/{_C_RUNNING}]"))
     if task.get("priority") is not None:
         p_val = int(task["priority"])
         p_color = _C_COMPLETE if p_val > 50 else _C_FAILED if p_val < 50 else "dim"
         lines.append(row("Priority", f"[{p_color}]{p_val}[/{p_color}]"))
+    if task.get("critical"):
+        lines.append(row("Critical", f"[{_C_FAILED}]yes[/{_C_FAILED}]"))
     if task.get("repo"):
         lines.append(row("Repo", escape(str(task["repo"]))))
     if task.get("duration_minutes"):
@@ -376,6 +423,13 @@ def _render_task_detail(task: dict | None, events: list[dict]) -> str:
         lines.append(row("Approved by", escape(str(task["approved_by"]))))
     lines.append(row("Created", _fmt_ts(task.get("created_at"))))
     lines.append(row("Updated", _fmt_ts(task.get("updated_at"))))
+    due_label, overdue = _fmt_due_date(task.get("due_date"))
+    if due_label:
+        due_str = f"[{_C_FAILED}]{due_label} (overdue)[/{_C_FAILED}]" if overdue else due_label
+        lines.append(row("Due", due_str))
+    n = task.get("recurrence_interval_days")
+    if n:
+        lines.append(row("Recurrence", f"every {n} days"))
 
     if task.get("approval_notes"):
         lines.append("")
@@ -494,6 +548,8 @@ def _render_job_summary(conn, job: dict | None) -> str:
     def row(key: str, val: str) -> str:
         return f"[dim]{key}:[/dim]  {val}"
 
+    if job.get("paused") and job.get("pause_reason"):
+        lines.append(row("Pause reason", escape(str(job["pause_reason"]))))
     if job.get("max_workers"):
         lines.append(row("Max workers", str(job["max_workers"])))
     lines.append(row("Created", _fmt_ts(job.get("created_at"))))
@@ -710,10 +766,10 @@ class EditJobModal(ModalScreen):
 class AddTaskModal(ModalScreen):
     CSS = MODAL_CSS
 
-    def __init__(self, job_id: str, existing_tasks: list[dict]) -> None:
+    def __init__(self, job_id: str | None = None, existing_tasks: list[dict] | None = None) -> None:
         super().__init__()
         self._job_id = job_id
-        self._existing_tasks = existing_tasks
+        self._existing_tasks = existing_tasks or []
         self._description: str = ""
         self._input_text: str = ""
 
@@ -727,9 +783,12 @@ class AddTaskModal(ModalScreen):
                     _format_task_reference_list(self._existing_tasks),
                     classes="modal-hint",
                 )
-            with ScrollableContainer():
+            with ScrollableContainer(can_focus=False):
                 yield Label("Description", classes="modal-field-label")
                 yield Button("", id="btn-edit-desc", classes="text-field-btn")
+                yield Checkbox("Human task", id="t-human-task")
+                yield Checkbox("Requires approval", id="t-requires-approval")
+                yield Checkbox("Critical", id="t-critical")
                 yield Label("Priority (0–100, default 50)", classes="modal-field-label")
                 yield Input(value="50", id="t-priority")
                 yield Label("Duration (minutes, optional)", classes="modal-field-label")
@@ -744,8 +803,13 @@ class AddTaskModal(ModalScreen):
                 yield Button("", id="btn-edit-input", classes="text-field-btn")
                 yield Label("Depends On (task IDs, comma-separated)", classes="modal-field-label")
                 yield Input(placeholder="e.g. abc12345, def67890", id="t-depends-on")
-                yield Checkbox("Human task", id="t-human-task")
-                yield Checkbox("Requires approval", id="t-requires-approval")
+                yield Label("Start Date (optional, ISO 8601)", classes="modal-field-label")
+                yield Input(placeholder="e.g. 2026-06-10T08:00:00Z", id="t-start-date")
+                yield Label("Due Date (optional, YYYY-MM-DD)", classes="modal-field-label")
+                yield Input(placeholder="e.g. 2026-06-30", id="t-due-date")
+                yield Label("Recurrence (days, optional)", classes="modal-field-label")
+                yield Input(placeholder="e.g. 7", id="t-recurrence")
+            yield Static("[dim]Ctrl+Enter to submit[/dim]", classes="modal-hint")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Cancel", id="btn-cancel", variant="default")
                 yield Button("Add Task", id="btn-submit", variant="primary")
@@ -837,6 +901,24 @@ class AddTaskModal(ModalScreen):
         if self.query_one("#t-requires-approval", Checkbox).value:
             task["requires_approval"] = True
 
+        if self.query_one("#t-critical", Checkbox).value:
+            task["critical"] = True
+
+        start_date = self.query_one("#t-start-date", Input).value.strip()
+        if start_date:
+            task["start_date"] = start_date
+
+        due_date = self.query_one("#t-due-date", Input).value.strip()
+        if due_date:
+            task["due_date"] = due_date
+
+        recurrence, err = _parse_int_field(self.query_one("#t-recurrence", Input).value, "Recurrence")
+        if err:
+            self.notify(err, severity="error")
+            return
+        if recurrence is not None:
+            task["recurrence_interval_days"] = recurrence
+
         self.dismiss(task)
 
     def _on_desc_edited(self, text: str | None) -> None:
@@ -852,6 +934,8 @@ class AddTaskModal(ModalScreen):
     def on_key(self, event) -> None:
         if event.key == "escape":
             self.dismiss(None)
+        elif event.key == "ctrl+enter":
+            self.query_one("#btn-submit", Button).press()
 
 
 class EditTaskModal(ModalScreen):
@@ -874,7 +958,7 @@ class EditTaskModal(ModalScreen):
                     _format_task_reference_list(self._existing_tasks),
                     classes="modal-hint",
                 )
-            with ScrollableContainer():
+            with ScrollableContainer(can_focus=False):
                 yield Label("Description", classes="modal-field-label")
                 yield Button(self._preview(self._description), id="btn-edit-desc", classes="text-field-btn")
                 yield Label("Duration (minutes, optional)", classes="modal-field-label")
@@ -890,6 +974,25 @@ class EditTaskModal(ModalScreen):
                 yield Button(self._preview(self._input_text), id="btn-edit-input", classes="text-field-btn")
                 yield Label("Depends On (task IDs, comma-separated)", classes="modal-field-label")
                 yield Input(id="t-depends-on")
+                yield Label("Start Date (optional, ISO 8601)", classes="modal-field-label")
+                yield Input(
+                    value=self._naxe_task.get("start_date") or "",
+                    placeholder="e.g. 2026-06-10T08:00:00Z",
+                    id="t-start-date",
+                )
+                yield Label("Due Date (optional, YYYY-MM-DD)", classes="modal-field-label")
+                yield Input(
+                    value=self._naxe_task.get("due_date") or "",
+                    placeholder="e.g. 2026-06-30",
+                    id="t-due-date",
+                )
+                yield Label("Recurrence (days, optional)", classes="modal-field-label")
+                yield Input(
+                    value=str(self._naxe_task["recurrence_interval_days"]) if self._naxe_task.get("recurrence_interval_days") else "",
+                    placeholder="e.g. 7",
+                    id="t-recurrence",
+                )
+                yield Checkbox("Critical", id="t-critical", value=bool(self._naxe_task.get("critical")))
             with Horizontal(classes="modal-buttons"):
                 yield Button("Cancel", id="btn-cancel", variant="default")
                 yield Button("Save", id="btn-submit", variant="primary")
@@ -967,6 +1070,20 @@ class EditTaskModal(ModalScreen):
 
         if max_retries is not None:
             updates["max_retries"] = max_retries
+
+        start_date = self.query_one("#t-start-date", Input).value.strip()
+        updates["start_date"] = start_date or None
+
+        due_date = self.query_one("#t-due-date", Input).value.strip()
+        updates["due_date"] = due_date or None
+
+        recurrence, err = _parse_int_field(self.query_one("#t-recurrence", Input).value, "Recurrence")
+        if err:
+            self.notify(err, severity="error")
+            return
+        updates["recurrence_interval_days"] = recurrence  # None clears it
+
+        updates["critical"] = bool(self.query_one("#t-critical", Checkbox).value)
 
         self.dismiss(updates)
 
@@ -1137,6 +1254,7 @@ class HumanActionsScreen(Screen):
                 self.query_one("#actions-detail", Static).update(
                     _render_task_detail(task, events)
                 )
+        self._conn.rollback()
 
     @on(DataTable.RowHighlighted)
     def on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -1291,6 +1409,7 @@ class JobDetailScreen(Screen):
         Binding("n", "new_task", "New Task"),
         Binding("e", "edit_task_modal", "Edit Task"),
         Binding("x", "cancel_task", "Cancel Task"),
+        Binding("p", "pause_resume_job", "Pause/Resume"),
         Binding("E", "expand_all", "Expand All"),
         Binding("c", "collapse_all", "Collapse All"),
         Binding("q", "app.quit", "Quit"),
@@ -1345,6 +1464,7 @@ class JobDetailScreen(Screen):
         self._update_header()
         self._rebuild_tree()
         self._refresh_detail()
+        self._conn.rollback()
 
     def _refresh(self) -> None:
         self._load()
@@ -1369,6 +1489,8 @@ class JobDetailScreen(Screen):
         tags = ""
         if job.get("paused"):
             tags += f"  [{_C_RUNNING}]⏸ PAUSED[/{_C_RUNNING}]"
+        if job.get("paused") and job.get("pause_reason"):
+            tags += f"  [dim]— {escape(str(job['pause_reason']))}[/dim]"
         if job.get("worktree"):
             tags += "  [dim]⎇ worktree[/dim]"
 
@@ -1417,6 +1539,19 @@ class JobDetailScreen(Screen):
             return
 
         tasks = store.get_tasks_for_job(self._conn, job["id"])
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if tasks:
+            task_ids = [t["id"] for t in tasks]
+            placeholders = ",".join(["%s"] * len(task_ids))
+            dep_rows = self._conn.execute(
+                f"SELECT d.task_id FROM dependencies d "
+                f"JOIN tasks dep ON dep.id = d.depends_on_task_id "
+                f"WHERE d.task_id IN ({placeholders}) AND dep.status != 'completed'",
+                task_ids,
+            ).fetchall()
+            blocked_ids = {r["task_id"] for r in dep_rows}
+            for t in tasks:
+                t["display_status"] = _compute_display_status(t, blocked_ids, now_iso)
         if not tasks:
             tree.root.expand()
             tree.root.add_leaf(Text("No tasks yet.", style="dim"))
@@ -1626,6 +1761,32 @@ class JobDetailScreen(Screen):
     def action_manual_refresh(self) -> None:
         self._load()
 
+    def action_pause_resume_job(self) -> None:
+        job = self._current_job
+        if job is None:
+            return
+        if job.get("paused"):
+            store.resume_job(self._conn, job["id"])
+            self._conn.commit()
+            self._load()
+            self.notify("Job resumed")
+        else:
+            self.app.push_screen(
+                PromptModal("Pause reason (optional)"),
+                lambda reason: self._on_pause_confirmed(reason),
+            )
+
+    def _on_pause_confirmed(self, reason: str | None) -> None:
+        if reason is None:
+            return
+        job = self._current_job
+        if job is None:
+            return
+        store.pause_job(self._conn, job["id"], reason=reason or None)
+        self._conn.commit()
+        self._load()
+        self.notify("Job paused")
+
     def action_cycle_filter(self) -> None:
         idx = _TASK_FILTER_KEYS.index(self.task_filter)
         next_key = _TASK_FILTER_KEYS[(idx + 1) % len(_TASK_FILTER_KEYS)]
@@ -1799,8 +1960,10 @@ class NaxeUI(App):
         Binding("enter", "open_job", "Open Job"),
         Binding("a", "actions", "Actions"),
         Binding("n", "new_job", "New Job"),
+        Binding("t", "quick_task", "Quick Task"),
         Binding("e", "edit_job", "Edit Job"),
         Binding("x", "cancel_job", "Cancel Job"),
+        Binding("p", "pause_resume_job", "Pause/Resume"),
         Binding("r", "refresh", "Refresh"),
         Binding("f", "cycle_filter", "Cycle Filter"),
         Binding("q", "quit", "Quit"),
@@ -1891,6 +2054,7 @@ class NaxeUI(App):
             f"[bold]Jobs[/bold]  [dim]·  {total} {label}[/dim]"
             f"  [dim]↑↓ navigate  Enter open[/dim]"
         )
+        self._conn.rollback()
 
     def _refresh(self) -> None:
         self._load()
@@ -1899,6 +2063,7 @@ class NaxeUI(App):
             self.query_one("#job-summary", Static).update(
                 _render_job_summary(self._conn, job)
             )
+        self._conn.rollback()
 
     # ── Events ────────────────────────────────────────────────────────────────
 
@@ -1947,6 +2112,20 @@ class NaxeUI(App):
     def action_actions(self) -> None:
         if not isinstance(self.screen, HumanActionsScreen):
             self.push_screen(HumanActionsScreen())
+
+    def action_quick_task(self) -> None:
+        self.push_screen(AddTaskModal(), self._on_quick_task_created)
+
+    def _on_quick_task_created(self, task: dict | None) -> None:
+        if task is None:
+            return
+        try:
+            result = store.add_tasks(self._conn, tasks=[task])
+            self._conn.commit()
+            self._load()
+            self.push_screen(JobDetailScreen(result["job_id"]))
+        except Exception as e:
+            self.notify(str(e), title="Error creating quick task", severity="error")
 
     def action_new_job(self) -> None:
         self.push_screen(CreateJobModal(), self._on_job_created)
@@ -2013,6 +2192,36 @@ class NaxeUI(App):
 
     def action_refresh(self) -> None:
         self._load()
+
+    def action_pause_resume_job(self) -> None:
+        if not self._selected_job_id:
+            self.notify("No job selected", severity="warning")
+            return
+        job = store.get_job(self._conn, self._selected_job_id)
+        if job is None:
+            return
+        if job.get("paused"):
+            store.resume_job(self._conn, self._selected_job_id)
+            self._conn.commit()
+            self._load()
+            self.notify("Job resumed")
+        else:
+            self.push_screen(
+                PromptModal("Pause reason (optional)"),
+                lambda reason: self._on_pause_confirmed(reason),
+            )
+
+    def _on_pause_confirmed(self, reason: str | None) -> None:
+        if reason is None:
+            return
+        store.pause_job(self._conn, self._selected_job_id, reason=reason or None)
+        self._conn.commit()
+        self._load()
+        job = store.get_job(self._conn, self._selected_job_id)
+        self.query_one("#job-summary", Static).update(
+            _render_job_summary(self._conn, job)
+        )
+        self.notify("Job paused")
 
     def action_cycle_filter(self) -> None:
         idx = _JOB_FILTER_KEYS.index(self.job_filter)

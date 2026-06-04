@@ -22,15 +22,19 @@ def create_job(conn, name: str, max_workers: int | None = None, worktree: bool =
 
 def set_job_concurrency(conn, job_id: str, max_workers: int | None) -> dict | None:
     """Set or clear the max_workers limit on a job. Returns the updated job, or None if not found."""
-    if not get_job(conn, job_id):
+    job = get_job(conn, job_id)
+    if not job:
         return None
+    job_id = job["id"]
     conn.execute("UPDATE jobs SET max_workers = %s WHERE id = %s", (max_workers, job_id))
     return get_job(conn, job_id)
 
 
 def set_worktree_paths(conn, job_id: str, paths: dict) -> dict | None:
-    if not get_job(conn, job_id):
+    job = get_job(conn, job_id)
+    if not job:
         return None
+    job_id = job["id"]
     conn.execute(
         "UPDATE jobs SET worktree_paths = %s WHERE id = %s",
         (json.dumps(paths) if paths else None, job_id),
@@ -40,6 +44,12 @@ def set_worktree_paths(conn, job_id: str, paths: dict) -> dict | None:
 
 def get_job(conn, job_id: str) -> dict | None:
     row = _row(conn.execute("SELECT * FROM jobs WHERE id = %s", (job_id,)).fetchone())
+    if row is None:
+        # Fall back to prefix search so callers can use short IDs (e.g. first 8 chars).
+        rows = conn.execute("SELECT * FROM jobs WHERE id LIKE %s", (job_id + "%",)).fetchall()
+        if len(rows) > 1:
+            raise ValueError(f"Ambiguous job ID prefix '{job_id}' matches {len(rows)} jobs")
+        row = _row(rows[0]) if rows else None
     if row and row.get("worktree_paths"):
         try:
             row["worktree_paths"] = json.loads(row["worktree_paths"])
@@ -48,14 +58,25 @@ def get_job(conn, job_id: str) -> dict | None:
     return row
 
 
-def list_jobs(conn, limit: int = 50, offset: int = 0) -> dict:
-    total = conn.execute("SELECT COUNT(*) as n FROM jobs").fetchone()["n"]
-    jobs = [
-        dict(r)
-        for r in conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT %s OFFSET %s", (limit, offset)
-        ).fetchall()
-    ]
+def list_jobs(conn, limit: int = 50, offset: int = 0, id_prefix: str | None = None) -> dict:
+    if id_prefix:
+        pattern = id_prefix + "%"
+        total = conn.execute("SELECT COUNT(*) as n FROM jobs WHERE id LIKE %s", (pattern,)).fetchone()["n"]
+        jobs = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM jobs WHERE id LIKE %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (pattern, limit, offset),
+            ).fetchall()
+        ]
+    else:
+        total = conn.execute("SELECT COUNT(*) as n FROM jobs").fetchone()["n"]
+        jobs = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT %s OFFSET %s", (limit, offset)
+            ).fetchall()
+        ]
     return {"jobs": jobs, "total": total, "has_more": offset + len(jobs) < total}
 
 
@@ -73,14 +94,29 @@ def list_watch_jobs(conn, session_start: str) -> list[dict]:
     ]
 
 
-def add_tasks(conn, job_id: str, tasks: list[dict]) -> list[str]:
+def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None) -> dict:
     """
     Batch insert tasks + their dependencies atomically.
     Raises ValueError if any dep ID is unknown or the job doesn't exist.
     Caller is responsible for cycle detection before calling this.
+
+    If job_id is None, a new job is auto-created using the first task's name.
+    Returns {'job_id': str, 'task_ids': list[str], 'auto_created_job': bool}.
     """
-    if not get_job(conn, job_id):
-        raise ValueError(f"Job '{job_id}' not found")
+    if tasks is None:
+        tasks = []
+    auto_created = False
+    if job_id is None:
+        if not tasks:
+            raise ValueError("tasks must be non-empty when job_id is not provided")
+        job = create_job(conn, tasks[0]["name"])
+        job_id = job["id"]
+        auto_created = True
+    else:
+        job = get_job(conn, job_id)
+        if not job:
+            raise ValueError(f"Job '{job_id}' not found")
+        job_id = job["id"]
 
     # Build set of all known task IDs (existing in DB + new batch)
     existing_ids = {
@@ -109,8 +145,9 @@ def add_tasks(conn, job_id: str, tasks: list[dict]) -> list[str]:
         conn.execute(
             """INSERT INTO tasks
                (id, job_id, name, description, status, duration_minutes, max_retries, input,
-                resources, priority, repo, requires_approval, human_task, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                resources, priority, repo, requires_approval, human_task, start_date, due_date,
+                recurrence_interval_days, critical, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 tid, job_id, t["name"], t.get("description"),
                 t.get("duration_minutes"), t.get("max_retries", 0), t.get("input"),
@@ -118,6 +155,10 @@ def add_tasks(conn, job_id: str, tasks: list[dict]) -> list[str]:
                 t.get("priority", 50), t.get("repo"),
                 1 if t.get("requires_approval") else 0,
                 1 if t.get("human_task") else 0,
+                t.get("start_date"),
+                t.get("due_date"),
+                t.get("recurrence_interval_days"),
+                1 if t.get("critical") else 0,
                 now, now,
             ),
         )
@@ -135,7 +176,7 @@ def add_tasks(conn, job_id: str, tasks: list[dict]) -> list[str]:
     for tid in task_ids:
         _auto_transition_to_awaiting_approval(conn, tid, job_id)
 
-    return task_ids
+    return {"job_id": job_id, "task_ids": task_ids, "auto_created_job": auto_created}
 
 
 def _auto_transition_to_awaiting_approval(conn, task_id: str, job_id: str) -> None:
@@ -197,6 +238,8 @@ def claim_task(conn, task_id: str, agent_id: str) -> bool:
     task = get_task(conn, task_id)
     if task and task.get("human_task") == 1:
         return False
+    if task and task.get("start_date") and task["start_date"] > _now():
+        return False
     now = _now()
     cur = conn.execute(
         """UPDATE tasks SET status = 'in_progress', owner_agent_id = %s, updated_at = %s
@@ -251,6 +294,7 @@ def claim_next_action(conn, job_id: str, agent_id: str, repo: str | None = None)
         AND t.status = 'pending'
         AND t.owner_agent_id IS NULL
         AND (t.human_task = 0 OR t.human_task IS NULL)
+        AND (t.start_date IS NULL OR t.start_date <= %s)
         AND NOT EXISTS (
             SELECT 1 FROM dependencies d
             JOIN tasks dep ON dep.id = d.depends_on_task_id
@@ -263,15 +307,15 @@ def claim_next_action(conn, job_id: str, agent_id: str, repo: str | None = None)
             f"""SELECT * FROM tasks t
                WHERE {base_where}
                  AND (t.repo = %s OR t.repo IS NULL)
-               ORDER BY priority DESC, created_at ASC""",
-            (job_id, repo),
+               ORDER BY critical DESC, priority DESC, created_at ASC""",
+            (job_id, _now(), repo),
         ).fetchall()
     else:
         candidates = conn.execute(
             f"""SELECT * FROM tasks t
                WHERE {base_where}
-               ORDER BY priority DESC, created_at ASC""",
-            (job_id,),
+               ORDER BY critical DESC, priority DESC, created_at ASC""",
+            (job_id, _now()),
         ).fetchall()
 
     task = None
@@ -303,8 +347,6 @@ def claim_next_action(conn, job_id: str, agent_id: str, repo: str | None = None)
     result["status"] = "in_progress"
     result["owner_agent_id"] = agent_id
     result["updated_at"] = now
-    dm = result.get("duration_minutes")
-    result["is_quick_win"] = dm is not None and dm <= 5
     log_event(conn, result["id"], job_id, "claimed", agent_id)
     return result
 
@@ -347,6 +389,9 @@ def cancel_job(conn, job_id: str) -> dict:
 
     Returns a dict with the updated job and count of tasks cancelled.
     """
+    job = get_job(conn, job_id)
+    if job:
+        job_id = job["id"]
     now = _now()
     non_terminal = ('pending', 'in_progress', 'awaiting_approval')
     to_cancel = [
@@ -372,17 +417,21 @@ def cancel_job(conn, job_id: str) -> dict:
     return {"job": job, "tasks_cancelled": tasks_cancelled}
 
 
-def pause_job(conn, job_id: str) -> dict | None:
-    if not get_job(conn, job_id):
+def pause_job(conn, job_id: str, reason=None) -> dict | None:
+    job = get_job(conn, job_id)
+    if not job:
         return None
-    conn.execute("UPDATE jobs SET paused = 1 WHERE id = %s", (job_id,))
+    job_id = job["id"]
+    conn.execute("UPDATE jobs SET paused = 1, pause_reason = %s WHERE id = %s", (reason, job_id))
     return get_job(conn, job_id)
 
 
 def resume_job(conn, job_id: str) -> dict | None:
-    if not get_job(conn, job_id):
+    job = get_job(conn, job_id)
+    if not job:
         return None
-    conn.execute("UPDATE jobs SET paused = 0 WHERE id = %s", (job_id,))
+    job_id = job["id"]
+    conn.execute("UPDATE jobs SET paused = 0, pause_reason = NULL WHERE id = %s", (job_id,))
     return get_job(conn, job_id)
 
 
@@ -395,6 +444,7 @@ def reclaim_stale_tasks(conn, job_id: str) -> list[dict]:
     job = get_job(conn, job_id)
     if not job:
         return []
+    job_id = job["id"]
     timeout = job.get("heartbeat_timeout_seconds") or 300
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeout)).isoformat()
     stale = conn.execute(
@@ -607,12 +657,28 @@ def complete_task(conn, task_id: str, agent_id: str, output: str | None = None) 
         return {"error": "Human tasks cannot be completed by agents — use approve_task or reject_task."}
     if task.get("requires_approval") == 1 and not task.get("approved_by"):
         return {"error": "Task requires approval before it can be completed. Call request_approval first."}
+    # Spawn recurrence BEFORE marking complete so the job doesn't close prematurely
+    recurrence_spawned = None
+    recurrence_interval_days = task.get("recurrence_interval_days")
+    if recurrence_interval_days:
+        new_start = (datetime.now(timezone.utc) + timedelta(days=recurrence_interval_days)).isoformat()
+        copy_fields = ("name", "description", "duration_minutes", "max_retries", "input",
+                       "resources", "priority", "repo", "requires_approval", "human_task",
+                       "recurrence_interval_days", "due_date", "critical")
+        new_task = {f: task[f] for f in copy_fields if task.get(f) is not None}
+        new_task["start_date"] = new_start
+        result = add_tasks(conn, task["job_id"], [new_task])
+        recurrence_spawned = {"job_id": task["job_id"], "task_id": result["task_ids"][0]}
+
     updated = update_task_status(conn, task_id, "completed", agent_id, output)
     from naxe import resolver as _resolver
     newly_unblocked = _resolver.get_newly_unblocked(conn, task["job_id"], task_id)
     for t in newly_unblocked:
         _auto_transition_to_awaiting_approval(conn, t["id"], t["job_id"])
-    return {"success": True, "task": updated}
+    ret = {"success": True, "task": updated}
+    if recurrence_spawned:
+        ret["recurrence_spawned"] = recurrence_spawned
+    return ret
 
 
 def update_task_status(
@@ -670,10 +736,14 @@ def add_job_dependency(conn, job_id: str, depends_on_job_id: str) -> None:
     """Add a dependency edge between jobs, raising ValueError on cycle or missing jobs."""
     from naxe import resolver as _resolver
 
-    if not get_job(conn, job_id):
+    j1 = get_job(conn, job_id)
+    if not j1:
         raise ValueError(f"Job '{job_id}' not found")
-    if not get_job(conn, depends_on_job_id):
+    job_id = j1["id"]
+    j2 = get_job(conn, depends_on_job_id)
+    if not j2:
         raise ValueError(f"Job '{depends_on_job_id}' not found")
+    depends_on_job_id = j2["id"]
     if _resolver.detect_job_cycle(conn, job_id, depends_on_job_id):
         raise ValueError("Dependency would create a cycle in job dependencies")
     conn.execute(
@@ -684,8 +754,10 @@ def add_job_dependency(conn, job_id: str, depends_on_job_id: str) -> None:
 
 def update_job_status(conn, job_id: str, status: str, output: str | None = None) -> dict | None:
     """Update a job's status. Returns the updated job, or None if not found."""
-    if not get_job(conn, job_id):
+    job = get_job(conn, job_id)
+    if not job:
         return None
+    job_id = job["id"]
     if output is not None:
         conn.execute(
             "UPDATE jobs SET status = %s, output = %s WHERE id = %s", (status, output, job_id)
@@ -714,8 +786,10 @@ def _get_newly_unblocked_jobs(conn, completed_job_id: str) -> list[dict]:
 
 def edit_job(conn, job_id: str, name: str) -> dict | None:
     """Rename a job. Returns the updated job, or None if not found."""
-    if not get_job(conn, job_id):
+    job = get_job(conn, job_id)
+    if not job:
         return None
+    job_id = job["id"]
     conn.execute("UPDATE jobs SET name = %s WHERE id = %s", (name, job_id))
     return get_job(conn, job_id)
 
@@ -776,7 +850,7 @@ def edit_task(conn, task_id: str, updates: dict) -> dict | None:
                 (task_id, dep),
             )
 
-    editable = ("name", "description", "resources", "duration_minutes", "input", "max_retries")
+    editable = ("name", "description", "resources", "duration_minutes", "input", "max_retries", "start_date", "due_date", "recurrence_interval_days", "critical")
     set_parts = []
     params = []
     for field in editable:
@@ -784,6 +858,8 @@ def edit_task(conn, task_id: str, updates: dict) -> dict | None:
             val = updates[field]
             if field == "resources":
                 val = json.dumps(val) if val is not None else None
+            if field == "critical":
+                val = 1 if val else 0
             set_parts.append(f"{field} = %s")
             params.append(val)
 
