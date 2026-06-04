@@ -31,11 +31,11 @@ def test_list_jobs(conn):
 
 def test_add_tasks_lifecycle(conn):
     job = store.create_job(conn, "lifecycle")
-    task_ids = store.add_tasks(conn, job["id"], [
+    result = store.add_tasks(conn, job["id"], [
         {"id": "t1", "name": "First"},
         {"id": "t2", "name": "Second", "depends_on": ["t1"]},
     ])
-    assert len(task_ids) == 2
+    assert len(result["task_ids"]) == 2
 
     task = store.get_task(conn, "t1")
     assert task["status"] == "pending"
@@ -79,6 +79,31 @@ def test_add_tasks_rejects_unknown_dep(conn):
 def test_add_tasks_rejects_unknown_job(conn):
     with pytest.raises(ValueError, match="not found"):
         store.add_tasks(conn, "fake-job-id", [{"id": "t1", "name": "Task"}])
+
+
+def test_add_tasks_with_prefix_id(conn):
+    job = store.create_job(conn, "prefix-test")
+    prefix = job["id"][:8]
+    store.add_tasks(conn, prefix, [{"id": "t1", "name": "Task"}])
+    tasks = store.get_tasks_for_job(conn, job["id"])
+    assert len(tasks) == 1
+    assert tasks[0]["job_id"] == job["id"]
+
+
+def test_add_tasks_without_job_id_creates_job(conn):
+    result = store.add_tasks(conn, tasks=[{"id": "t1", "name": "My Task"}])
+    assert result["auto_created_job"] is True
+    assert len(result["task_ids"]) == 1
+    job = store.get_job(conn, result["job_id"])
+    assert job is not None
+    tasks = store.get_tasks_for_job(conn, result["job_id"])
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == "t1"
+
+
+def test_add_tasks_without_job_id_empty_raises(conn):
+    with pytest.raises(ValueError, match="non-empty"):
+        store.add_tasks(conn, tasks=[])
 
 
 def test_update_task_status(conn):
@@ -171,7 +196,7 @@ def test_claim_next_action_happy_path(conn):
     assert task["id"] == "t1"
     assert task["status"] == "in_progress"
     assert task["owner_agent_id"] == "agent-1"
-    assert task["is_quick_win"] is True
+    assert "is_quick_win" not in task
 
 
 def test_claim_next_action_two_workers_get_different_tasks(conn):
@@ -529,6 +554,198 @@ def test_requires_approval_agent_flow_intact(conn):
 
 
 # Startup scan
+
+# start_date behavior
+
+def test_future_start_date_excluded_from_get_next_actions(conn):
+    from naxe import resolver
+    job = store.create_job(conn, "start-date-future-gna")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Future Task", "start_date": future}])
+    actions = resolver.get_next_actions(conn, job["id"])
+    assert not any(a["id"] == "t1" for a in actions)
+
+
+def test_past_or_null_start_date_included_in_get_next_actions(conn):
+    from naxe import resolver
+    job = store.create_job(conn, "start-date-past-gna")
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.add_tasks(conn, job["id"], [
+        {"id": "t1", "name": "Past Task", "start_date": past},
+        {"id": "t2", "name": "Null Start Date Task"},
+    ])
+    actions = resolver.get_next_actions(conn, job["id"])
+    ids = [a["id"] for a in actions]
+    assert "t1" in ids
+    assert "t2" in ids
+
+
+def test_future_start_date_claim_next_action_returns_none(conn):
+    job = store.create_job(conn, "start-date-future-cna")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Future Task", "start_date": future}])
+    result = store.claim_next_action(conn, job["id"], "agent-1")
+    assert result is None
+
+
+def test_future_start_date_claim_task_returns_false(conn):
+    job = store.create_job(conn, "start-date-future-claim")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Future Task", "start_date": future}])
+    result = store.claim_task(conn, "t1", "agent-1")
+    assert result is False
+
+
+def test_edit_task_can_update_start_date(conn):
+    job = store.create_job(conn, "start-date-edit")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task"}])
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    updated = store.edit_task(conn, "t1", {"start_date": future})
+    assert updated is not None
+    assert updated["start_date"] == future
+
+    # Clearing start_date should also work
+    cleared = store.edit_task(conn, "t1", {"start_date": None})
+    assert cleared is not None
+    assert cleared["start_date"] is None
+
+
+def test_due_date_stored_and_returned(conn):
+    job = store.create_job(conn, "due-date-test")
+    due = "2026-12-31T23:59:59+00:00"
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task", "due_date": due}])
+    task = store.get_task(conn, "t1")
+    assert task is not None
+    assert task["due_date"] == due
+
+
+def test_edit_task_can_update_due_date(conn):
+    job = store.create_job(conn, "due-date-edit")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task"}])
+    due = "2026-06-30T00:00:00+00:00"
+    updated = store.edit_task(conn, "t1", {"due_date": due})
+    assert updated is not None
+    assert updated["due_date"] == due
+
+    cleared = store.edit_task(conn, "t1", {"due_date": None})
+    assert cleared is not None
+    assert cleared["due_date"] is None
+
+
+def test_recurrence_spawns_task_in_same_job(conn):
+    job = store.create_job(conn, "recurrence-job")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Daily Task", "recurrence_interval_days": 7}])
+    store.claim_task(conn, "t1", "agent-1")
+    result = store.complete_task(conn, "t1", "agent-1", output="done")
+    assert result.get("success") is True
+    assert "recurrence_spawned" in result
+    spawned = result["recurrence_spawned"]
+    # Spawned task is in the SAME job, not a new one
+    assert spawned["job_id"] == job["id"]
+    tasks = store.get_tasks_for_job(conn, job["id"])
+    # Original (completed) + new recurring task
+    assert len(tasks) == 2
+    new_task = next(t for t in tasks if t["id"] == spawned["task_id"])
+    assert new_task["recurrence_interval_days"] == 7
+    assert new_task["start_date"] is not None
+
+
+def test_no_recurrence_without_interval(conn):
+    job = store.create_job(conn, "no-recurrence-job")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "One-shot Task"}])
+    store.claim_task(conn, "t1", "agent-1")
+    result = store.complete_task(conn, "t1", "agent-1", output="done")
+    assert result.get("success") is True
+    assert "recurrence_spawned" not in result
+
+
+def test_job_stays_active_after_recurrence(conn):
+    # The new pending recurring task must prevent the job from closing
+    job = store.create_job(conn, "recurrence-no-close")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task", "recurrence_interval_days": 3}])
+    store.claim_task(conn, "t1", "agent-1")
+    store.complete_task(conn, "t1", "agent-1")
+    updated_job = store.get_job(conn, job["id"])
+    assert updated_job["status"] == "active"
+
+
+def test_pause_job_stores_reason(conn):
+    job = store.create_job(conn, "pause-reason-job")
+    paused = store.pause_job(conn, job["id"], reason="waiting for deployment")
+    assert paused["paused"] == 1
+    assert paused["pause_reason"] == "waiting for deployment"
+
+
+def test_resume_job_clears_pause_reason(conn):
+    job = store.create_job(conn, "resume-clears-reason")
+    store.pause_job(conn, job["id"], reason="some reason")
+    resumed = store.resume_job(conn, job["id"])
+    assert resumed["paused"] == 0
+    assert resumed["pause_reason"] is None
+
+
+def test_pause_job_without_reason(conn):
+    job = store.create_job(conn, "pause-no-reason")
+    paused = store.pause_job(conn, job["id"])
+    assert paused["paused"] == 1
+    assert paused["pause_reason"] is None
+
+
+def test_critical_task_claimed_before_high_priority_non_critical(conn):
+    job = store.create_job(conn, "critical-priority")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t-normal", "name": "High Priority Normal", "priority": 100},
+        {"id": "t-critical", "name": "Low Priority Critical", "priority": 50, "critical": True},
+    ])
+    task = store.claim_next_action(conn, job["id"], "agent-1")
+    assert task is not None
+    assert task["id"] == "t-critical"
+
+
+def test_two_critical_tasks_higher_priority_wins(conn):
+    job = store.create_job(conn, "critical-priority-tiebreak")
+    store.add_tasks(conn, job["id"], [
+        {"id": "t-low", "name": "Critical Low", "priority": 30, "critical": True},
+        {"id": "t-high", "name": "Critical High", "priority": 80, "critical": True},
+    ])
+    task = store.claim_next_action(conn, job["id"], "agent-1")
+    assert task is not None
+    assert task["id"] == "t-high"
+
+
+def test_edit_task_can_set_and_clear_critical(conn):
+    job = store.create_job(conn, "critical-edit")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task"}])
+    updated = store.edit_task(conn, "t1", {"critical": True})
+    assert updated["critical"] == 1
+    cleared = store.edit_task(conn, "t1", {"critical": False})
+    assert cleared["critical"] == 0
+
+
+def test_claim_next_action_no_is_quick_win(conn):
+    job = store.create_job(conn, "no-quick-win")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task", "duration_minutes": 3}])
+    task = store.claim_next_action(conn, job["id"], "agent-1")
+    assert task is not None
+    assert "is_quick_win" not in task
+
+
+def test_display_status_scheduled_task_not_in_next_actions(conn):
+    from naxe import resolver
+    from datetime import datetime, timedelta, timezone
+    job = store.create_job(conn, "ds-scheduled")
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    store.add_tasks(conn, job["id"], [
+        {"id": "t1", "name": "Future Task", "start_date": future},
+        {"id": "t2", "name": "Ready Task"},
+    ])
+    actions = resolver.get_next_actions(conn, job["id"])
+    ids = [a["id"] for a in actions]
+    assert "t2" in ids
+    assert "t1" not in ids  # scheduled, hidden until start_date
+    for a in actions:
+        assert a["display_status"] == "next_action"
+
 
 def test_startup_scan_only_processes_human_tasks(conn):
     job = store.create_job(conn, "startup-scan")

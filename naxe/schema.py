@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     status      TEXT NOT NULL DEFAULT 'active',
     output      TEXT,
     paused      INTEGER NOT NULL DEFAULT 0,
+    pause_reason TEXT DEFAULT NULL,
     worktree    INTEGER NOT NULL DEFAULT 0,
     worktree_paths  TEXT
 );
@@ -34,7 +35,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     requires_approval INTEGER NOT NULL DEFAULT 0,
     human_task       INTEGER NOT NULL DEFAULT 0,
     created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    start_date       TIMESTAMP DEFAULT NULL,
+    due_date         TIMESTAMP DEFAULT NULL,
+    recurrence_interval_days INTEGER DEFAULT NULL,
+    critical         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -146,6 +151,11 @@ _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN worktree_paths TEXT",
     "ALTER TABLE tasks ADD COLUMN human_task INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN start_date TIMESTAMP DEFAULT NULL",
+    "ALTER TABLE tasks ADD COLUMN due_date TIMESTAMP DEFAULT NULL",
+    "ALTER TABLE tasks ADD COLUMN recurrence_interval_days INTEGER DEFAULT NULL",
+    "ALTER TABLE jobs ADD COLUMN pause_reason TEXT DEFAULT NULL",
+    "ALTER TABLE tasks ADD COLUMN critical INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -159,13 +169,24 @@ def _init_schema(conn, is_postgres: bool = False) -> None:
     conn.commit()
     # ALTER TABLE migrations only run once per process to avoid DDL lock contention
     if not _migrations_run:
+        if is_postgres:
+            # Short lock timeout so DDL never hangs waiting for idle TUI transactions
+            try:
+                conn.execute("SET lock_timeout = '3s'")
+                conn.commit()
+            except Exception:
+                conn.rollback()
         for migration in _MIGRATIONS:
             try:
                 if is_postgres:
-                    # PostgreSQL supports IF NOT EXISTS to avoid DDL lock contention
-                    # when columns already exist. SQLite does not support this syntax.
                     migration = migration.replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS ")
                 conn.execute(migration)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        if is_postgres:
+            try:
+                conn.execute("RESET lock_timeout")
                 conn.commit()
             except Exception:
                 conn.rollback()
