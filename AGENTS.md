@@ -1,5 +1,7 @@
 # Task Management
 
+> **Note for human contributors:** This file contains instructions for AI agents working in this repository. It is automatically read by Claude Code and similar tools. You can ignore it — see the README for setup and contribution guidance.
+
 This project uses **Naxe** for all task tracking and dependency management via MCP.
 
 ## Rules — follow these exactly
@@ -25,4 +27,40 @@ create_job("name")
   → ... do the work ...
   → complete_task(task_id, agent_id) # returns newly_unblocked
   → get_next_actions(job_id)         # repeat
+```
+
+## Approvals and the feedback loop
+
+Some tasks require human approval before they are considered complete. When a task enters the `awaiting_approval` state, a human reviewer can take one of three actions:
+
+| Reviewer action | Tool | What happens |
+|---|---|---|
+| Approve | `approve_task` | Task moves to `completed`. |
+| Hard reject | `reject_task` | Task is marked `failed`. Auto-retry triggers if `max_retries` is configured; otherwise the task is permanently failed. Use this when the work should **not** be retried through feedback. |
+| Return for revision | `return_task` | Task loops back to `pending`. `approval_round` is incremented and the reviewer's feedback is stored as a comment. Use this when the agent should revise and resubmit. |
+
+### Distinction between `reject_task` and `return_task`
+
+- **`reject_task`** — hard fail. The task is marked `failed` and will not re-enter the approval queue through this mechanism. If `max_retries` is configured the task may be retried from scratch, but no structured feedback is passed to the agent.
+- **`return_task`** — deny and retry. The task is sent back to `pending` so the agent can revise its work. `approval_round` is incremented each time, and the reviewer's feedback comment is attached to the task record.
+
+### Agent guidance for re-claimed tasks
+
+When a task re-enters `pending` after a `return_task`, the task record includes a `recent_comments` field populated with the human's feedback from the most recent approval round. Before starting work on any re-claimed task, agents must:
+
+1. Check `recent_comments` on the claimed task record.
+2. Incorporate the requested changes before calling `request_approval` again.
+3. If the full history across multiple rounds is needed, call `get_task_comments(task_id)` to retrieve all comments in order.
+
+### Requesting approval
+
+```
+claim_task(task_id, agent_id)
+  → ... do the work ...
+  → request_approval(task_id, agent_id)   # moves task to awaiting_approval
+  # human reviews and calls approve_task / reject_task / return_task
+  # if return_task: task goes back to pending with feedback in recent_comments
+  → claim_task(task_id, agent_id)         # re-claim after return
+  → ... revise the work based on recent_comments ...
+  → request_approval(task_id, agent_id)   # resubmit
 ```

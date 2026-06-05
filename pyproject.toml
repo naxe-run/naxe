@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "naxe"
 version = "0.1.0"
 description = "Dependency-aware task graph engine for AI agents (MCP server)"
+license = {text = "AGPL-3.0-only"}
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
@@ -15,18 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-]
 postgres = [
     "psycopg[binary]>=3.1",
 ]
 
 [project.scripts]
 naxe = "naxe.server:main"
+naxe-init = "naxe.init_cmd:main"
 naxe-config = "naxe.cli_config:main"
-naxe-watch = "naxe.watch:main"
 naxe-ui = "naxe.tui:main"
 
 [tool.setuptools.packages.find]

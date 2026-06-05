@@ -46,8 +46,9 @@ def test_claim_task_succeeds(conn):
     job = store.create_job(conn, "claim-test")
     store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Task"}])
 
-    success = store.claim_task(conn, "t1", "agent-1")
-    assert success is True
+    result = store.claim_task(conn, "t1", "agent-1")
+    assert result is not False
+    assert isinstance(result, dict)
 
     task = store.get_task(conn, "t1")
     assert task["status"] == "in_progress"
@@ -61,7 +62,8 @@ def test_claim_task_double_claim_prevented(conn):
     r1 = store.claim_task(conn, "t1", "agent-1")
     r2 = store.claim_task(conn, "t1", "agent-2")
 
-    assert r1 is True
+    assert r1 is not False
+    assert isinstance(r1, dict)
     assert r2 is False
 
     task = store.get_task(conn, "t1")
@@ -551,6 +553,168 @@ def test_requires_approval_agent_flow_intact(conn):
     result = store.approve_task(conn, "t1", "approver-x")
     assert result is not None
     assert result["task"]["status"] == "completed"
+
+
+# Approval feedback loop
+
+def _setup_approval_task(conn, max_retries=0):
+    """Helper: create a job + requires_approval task, claim it, request approval."""
+    job = store.create_job(conn, "feedback-loop-job")
+    store.add_tasks(conn, job["id"], [
+        {"id": "afl1", "name": "Approval task", "requires_approval": True, "max_retries": max_retries}
+    ])
+    store.claim_task(conn, "afl1", "agent-1")
+    store.request_approval(conn, "afl1", "agent-1", notes="ready for review")
+    return job
+
+
+def test_return_task_loops_back_to_pending(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Fix the formatting")
+    task = store.get_task(conn, "afl1")
+    assert task["status"] == "pending"
+    assert task["approval_round"] == 1
+    assert task["retry_count"] == 0
+
+
+def test_return_task_increments_approval_round(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Fix A")
+    store.claim_task(conn, "afl1", "agent-1")
+    store.request_approval(conn, "afl1", "agent-1", notes="fixed A")
+    store.return_task(conn, "afl1", "approver-1", "Fix B")
+    task = store.get_task(conn, "afl1")
+    assert task["approval_round"] == 2
+
+
+def test_return_task_bypasses_max_retries(conn):
+    _setup_approval_task(conn, max_retries=0)
+    store.return_task(conn, "afl1", "approver-1", "Add more detail")
+    task = store.get_task(conn, "afl1")
+    assert task["status"] == "pending"
+
+
+def test_reject_without_feedback_exhausted_stays_failed(conn):
+    _setup_approval_task(conn, max_retries=0)
+    store.reject_task(conn, "afl1", "approver-1", "hard reject")
+    task = store.get_task(conn, "afl1")
+    assert task["status"] == "failed"
+
+
+def test_reject_without_feedback_retries_if_configured(conn):
+    _setup_approval_task(conn, max_retries=1)
+    store.reject_task(conn, "afl1", "approver-1", "try again")
+    task = store.get_task(conn, "afl1")
+    assert task["status"] == "pending"
+    assert task["retry_count"] == 1
+
+
+def test_return_task_stores_comment(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Fix the formatting")
+    comments = store.get_task_comments(conn, "afl1")
+    assert len(comments) == 1
+    assert comments[0]["author_type"] == "human"
+    assert comments[0]["author_id"] == "approver-1"
+    assert comments[0]["content"] == "Fix the formatting"
+    assert comments[0]["approval_round"] == 0
+
+
+def test_claim_task_includes_recent_comments(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Fix the formatting")
+    result = store.claim_task(conn, "afl1", "agent-1")
+    assert isinstance(result, dict)
+    assert "recent_comments" in result
+    assert len(result["recent_comments"]) == 1
+    assert result["recent_comments"][0]["content"] == "Fix the formatting"
+
+
+def test_claim_next_action_includes_recent_comments(conn):
+    job = store.create_job(conn, "cna-feedback-job")
+    store.add_tasks(conn, job["id"], [
+        {"id": "afl-cna1", "name": "Approval task", "requires_approval": True}
+    ])
+    store.claim_task(conn, "afl-cna1", "agent-1")
+    store.request_approval(conn, "afl-cna1", "agent-1", notes="ready")
+    store.return_task(conn, "afl-cna1", "approver-1", "Revise section 2")
+    result = store.claim_next_action(conn, job["id"], "agent-1")
+    assert result is not None
+    assert "recent_comments" in result
+    assert len(result["recent_comments"]) == 1
+    assert result["recent_comments"][0]["content"] == "Revise section 2"
+
+
+def test_recent_comments_only_latest_round_by_default(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Round 0 feedback")
+    store.claim_task(conn, "afl1", "agent-1")
+    store.request_approval(conn, "afl1", "agent-1", notes="revised")
+    store.return_task(conn, "afl1", "approver-1", "Round 1 feedback")
+    result = store.claim_task(conn, "afl1", "agent-1")
+    assert isinstance(result, dict)
+    recent = result["recent_comments"]
+    assert len(recent) == 1
+    assert recent[0]["content"] == "Round 1 feedback"
+    assert recent[0]["approval_round"] == 1
+
+
+def test_add_task_comment_human(conn):
+    job = store.create_job(conn, "comment-human-job")
+    store.add_tasks(conn, job["id"], [{"id": "afl-ch1", "name": "Task"}])
+    comment = store.add_task_comment(conn, "afl-ch1", "human-bob", "human", "Great work!")
+    assert comment is not None
+    assert comment["author_type"] == "human"
+    assert comment["content"] == "Great work!"
+    comments = store.get_task_comments(conn, "afl-ch1")
+    assert len(comments) == 1
+
+
+def test_add_task_comment_agent(conn):
+    job = store.create_job(conn, "comment-agent-job")
+    store.add_tasks(conn, job["id"], [{"id": "afl-ca1", "name": "Task"}])
+    comment = store.add_task_comment(conn, "afl-ca1", "agent-x", "agent", "Starting now")
+    assert comment is not None
+    assert comment["author_type"] == "agent"
+
+
+def test_get_task_comments_filter_by_round(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Round 0 feedback")
+    store.claim_task(conn, "afl1", "agent-1")
+    store.request_approval(conn, "afl1", "agent-1", notes="revised")
+    store.return_task(conn, "afl1", "approver-1", "Round 1 feedback")
+    round0 = store.get_task_comments(conn, "afl1", approval_round=0)
+    round1 = store.get_task_comments(conn, "afl1", approval_round=1)
+    assert len(round0) == 1
+    assert round0[0]["content"] == "Round 0 feedback"
+    assert len(round1) == 1
+    assert round1[0]["content"] == "Round 1 feedback"
+
+
+def test_comment_event_logged(conn):
+    job = store.create_job(conn, "comment-event-job")
+    store.add_tasks(conn, job["id"], [{"id": "afl-ce1", "name": "Task"}])
+    store.add_task_comment(conn, "afl-ce1", "human-alice", "human", "Looks good")
+    events = store.get_task_events(conn, "afl-ce1")
+    event_types = [e["event_type"] for e in events]
+    assert "comment_added" in event_types
+
+
+def test_feedback_loop_event_logged(conn):
+    _setup_approval_task(conn)
+    store.return_task(conn, "afl1", "approver-1", "Fix it")
+    events = store.get_task_events(conn, "afl1")
+    event_types = [e["event_type"] for e in events]
+    assert "feedback_loop" in event_types
+
+
+def test_claim_no_comments_returns_empty_list(conn):
+    job = store.create_job(conn, "no-comments-job")
+    store.add_tasks(conn, job["id"], [{"id": "afl-nc1", "name": "Task"}])
+    result = store.claim_task(conn, "afl-nc1", "agent-1")
+    assert isinstance(result, dict)
+    assert result["recent_comments"] == []
 
 
 # Startup scan

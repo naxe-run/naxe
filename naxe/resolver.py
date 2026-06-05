@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from naxe.schema import TaskStatus
+
 
 def detect_cycle(tasks: list[dict]) -> bool:
     """
@@ -63,7 +65,7 @@ def get_next_actions(conn, job_id: str, repo: str | None = None) -> list[dict]:
         if not deps:
             unblocked = True
         else:
-            unblocked = all(r["status"] == "completed" for r in deps)
+            unblocked = all(r["status"] == TaskStatus.COMPLETED for r in deps)
 
         if unblocked:
             t = dict(task)
@@ -126,7 +128,7 @@ def get_blocking_reasons(conn, job_id: str) -> list[dict]:
     ).fetchall()
     blocked: dict[str, dict] = {}
     for row in rows:
-        if row["dep_status"] == "completed":
+        if row["dep_status"] == TaskStatus.COMPLETED:
             continue
         tid = row["id"]
         if tid not in blocked:

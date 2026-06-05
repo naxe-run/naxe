@@ -2,13 +2,13 @@ Metadata-Version: 2.4
 Name: naxe
 Version: 0.1.0
 Summary: Dependency-aware task graph engine for AI agents (MCP server)
+License: AGPL-3.0-only
 Requires-Python: >=3.11
+License-File: LICENSE
 Requires-Dist: mcp>=1.0.0
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: rich>=13.9.4
 Requires-Dist: textual>=0.52.0
-Provides-Extra: dev
-Requires-Dist: pytest>=8.0; extra == "dev"
-Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
 Provides-Extra: postgres
 Requires-Dist: psycopg[binary]>=3.1; extra == "postgres"
+Dynamic: license-file
