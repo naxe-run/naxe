@@ -23,16 +23,17 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 
-[project.urls]
-Homepage = "https://naxe.run"
-Source = "https://github.com/naxe-run/naxe"
-Issues = "https://github.com/naxe-run/naxe/issues"
 dependencies = [
     "mcp>=1.0.0",
     "pyyaml>=6.0",
     "rich>=13.9.4",
     "textual>=0.52.0",
 ]
+
+[project.urls]
+Homepage = "https://naxe.run"
+Source = "https://github.com/naxe-run/naxe"
+Issues = "https://github.com/naxe-run/naxe/issues"
 
 [project.optional-dependencies]
 postgres = [
