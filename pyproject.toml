@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naxe"
+version = "0.1.0"
+description = "Dependency-aware task graph engine for AI agents (MCP server)"
+readme = "README.md"
+license = {text = "AGPL-3.0-only"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Skyler Meints"}
+]
+keywords = ["mcp", "agents", "tasks", "ai", "llm", "workflow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+[project.urls]
+Homepage = "https://naxe.run"
+Source = "https://github.com/naxe-run/naxe"
+Issues = "https://github.com/naxe-run/naxe/issues"
+dependencies = [
+    "mcp>=1.0.0",
+    "pyyaml>=6.0",
+    "rich>=13.9.4",
+    "textual>=0.52.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.1",
+]
+
+[project.scripts]
+naxe = "naxe.server:main"
+naxe-init = "naxe.init_cmd:main"
+naxe-config = "naxe.cli_config:main"
+naxe-ui = "naxe.tui:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["naxe*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]

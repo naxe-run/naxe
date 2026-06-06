@@ -1,0 +1,81 @@
+from naxe.handlers.jobs import (
+    handle_create_job,
+    handle_list_jobs,
+    handle_edit_job,
+    handle_get_job_status,
+    handle_cancel_job,
+    handle_pause_job,
+    handle_resume_job,
+)
+from naxe.handlers.tasks import (
+    handle_add_tasks,
+    handle_get_next_actions,
+    handle_claim_task,
+    handle_claim_next_action,
+    handle_complete_task,
+    handle_fail_task,
+    handle_heartbeat_task,
+    handle_update_task_progress,
+    handle_cancel_task,
+    handle_edit_task,
+    handle_requeue_task,
+)
+from naxe.handlers.dependencies import (
+    handle_add_job_dependency,
+    handle_set_job_concurrency,
+    handle_set_worktree_paths,
+)
+from naxe.handlers.approval import (
+    handle_request_approval,
+    handle_approve_task,
+    handle_reject_task,
+    handle_return_task,
+)
+from naxe.handlers.audit import (
+    handle_add_task_comment,
+    handle_get_task_comments,
+    handle_get_task_events,
+    handle_get_job_audit_trail,
+    handle_get_blocked_tasks,
+)
+from naxe.handlers.templates import (
+    handle_create_job_template,
+    handle_list_templates,
+    handle_instantiate_template,
+)
+
+DISPATCH = {
+    "create_job":          handle_create_job,
+    "list_jobs":           handle_list_jobs,
+    "edit_job":            handle_edit_job,
+    "get_job_status":      handle_get_job_status,
+    "cancel_job":          handle_cancel_job,
+    "pause_job":           handle_pause_job,
+    "resume_job":          handle_resume_job,
+    "add_tasks":           handle_add_tasks,
+    "get_next_actions":    handle_get_next_actions,
+    "claim_task":          handle_claim_task,
+    "claim_next_action":   handle_claim_next_action,
+    "complete_task":       handle_complete_task,
+    "fail_task":           handle_fail_task,
+    "heartbeat_task":      handle_heartbeat_task,
+    "update_task_progress": handle_update_task_progress,
+    "cancel_task":         handle_cancel_task,
+    "edit_task":           handle_edit_task,
+    "requeue_task":        handle_requeue_task,
+    "add_job_dependency":  handle_add_job_dependency,
+    "set_job_concurrency": handle_set_job_concurrency,
+    "set_worktree_paths":  handle_set_worktree_paths,
+    "request_approval":    handle_request_approval,
+    "approve_task":        handle_approve_task,
+    "reject_task":         handle_reject_task,
+    "return_task":         handle_return_task,
+    "add_task_comment":    handle_add_task_comment,
+    "get_task_comments":   handle_get_task_comments,
+    "get_task_events":     handle_get_task_events,
+    "get_job_audit_trail": handle_get_job_audit_trail,
+    "get_blocked_tasks":   handle_get_blocked_tasks,
+    "create_job_template": handle_create_job_template,
+    "list_templates":      handle_list_templates,
+    "instantiate_template": handle_instantiate_template,
+}
