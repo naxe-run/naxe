@@ -125,12 +125,9 @@ def main() -> None:
     _print("Step 3 of 3 — MCP Configuration")
     _hr()
     _print()
-    import os
-    project_dir = os.getcwd()
-
     _print("  Install naxe globally and add it to Claude Code:")
     _print()
-    _print(f"    uv tool install '{project_dir}[postgres]'")
+    _print("    uv tool install 'naxe[postgres]'")
     _print()
 
     env_flags = f'--env NAXE_DB_URL="{db_url}"'
