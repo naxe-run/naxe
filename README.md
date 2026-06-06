@@ -7,15 +7,17 @@ A local-first MCP server that acts as a dependency-aware task graph engine for A
 ## Install
 
 ```bash
-uv tool install '/path/to/naxe[postgres]'
+uv tool install 'naxe[postgres]'
+# or: pipx install 'naxe[postgres]'
 ```
 
-This makes `naxe`, `naxe-init`, `naxe-config`, and `naxe-ui` available globally. Replace `/path/to/naxe` with the path where you cloned this repo.
+This makes `naxe`, `naxe-init`, `naxe-config`, and `naxe-ui` available globally.
 
-For development (editable install with test deps):
+For development (editable install):
 
 ```bash
-uv sync
+git clone https://github.com/naxe-run/naxe
+uv tool install --editable './naxe[postgres]'
 ```
 
 ## Quick Start
