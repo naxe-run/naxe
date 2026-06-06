@@ -127,7 +127,7 @@ def main() -> None:
     _print()
     _print("  Install naxe globally and add it to Claude Code:")
     _print()
-    _print("    uv tool install 'naxe[postgres]'")
+    _print("    uv tool install naxe")
     _print()
 
     env_flags = f'--env NAXE_DB_URL="{db_url}"'
