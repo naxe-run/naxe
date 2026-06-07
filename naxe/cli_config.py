@@ -11,7 +11,7 @@ def main():
     args = sys.argv[1:]
 
     if not args:
-        print("Usage: naxe-config <command> [args]")
+        print("Usage: naxe config <command> [args]")
         print()
         print("Commands:")
         print("  status                 Show DB connection, auth mode, and job summary")
@@ -33,7 +33,7 @@ def main():
 
     elif command == "set-url":
         if len(args) < 2:
-            print("Usage: naxe-config set-url <url>", file=sys.stderr)
+            print("Usage: naxe config set-url <url>", file=sys.stderr)
             sys.exit(1)
         write_config_url(args[1])
         print(f"Saved to {_CONFIG_FILE}")
@@ -44,7 +44,7 @@ def main():
 
     elif command == "set-theme":
         if len(args) < 2:
-            print("Usage: naxe-config set-theme <name>", file=sys.stderr)
+            print("Usage: naxe config set-theme <name>", file=sys.stderr)
             print("Built-in naxe themes: naxe, naxe-bold")
             sys.exit(1)
         write_theme(args[1])
@@ -56,13 +56,13 @@ def main():
 
     elif command == "register-agent":
         if len(args) < 2:
-            print("Usage: naxe-config register-agent <name>", file=sys.stderr)
+            print("Usage: naxe config register-agent <name>", file=sys.stderr)
             sys.exit(1)
         _register_agent(args[1])
 
     elif command == "revoke-agent":
         if len(args) < 2:
-            print("Usage: naxe-config revoke-agent <name>", file=sys.stderr)
+            print("Usage: naxe config revoke-agent <name>", file=sys.stderr)
             sys.exit(1)
         _revoke_agent(args[1])
 
@@ -136,15 +136,15 @@ def _register_agent(name: str) -> None:
         raw_key = os.environ.get("NAXE_API_KEY", "")
         if not raw_key:
             print(
-                "naxe-config: NAXE_API_KEY is required to register a new agent when agents are already registered.",
+                "naxe config: NAXE_API_KEY is required to register a new agent when agents are already registered.",
                 file=sys.stderr,
             )
             sys.exit(1)
         if not validate_key_format(raw_key):
-            print("naxe-config: NAXE_API_KEY has invalid format.", file=sys.stderr)
+            print("naxe config: NAXE_API_KEY has invalid format.", file=sys.stderr)
             sys.exit(1)
         if store.get_agent_by_key_hash(conn, auth.hash_key(raw_key)) is None:
-            print("naxe-config: Invalid or revoked API key.", file=sys.stderr)
+            print("naxe config: Invalid or revoked API key.", file=sys.stderr)
             sys.exit(1)
 
     raw_key = auth.generate_key()
@@ -152,7 +152,7 @@ def _register_agent(name: str) -> None:
         store.register_agent(conn, name, auth.hash_key(raw_key))
         conn.commit()
     except ValueError as e:
-        print(f"naxe-config: {e}", file=sys.stderr)
+        print(f"naxe config: {e}", file=sys.stderr)
         sys.exit(1)
 
     print(f"Agent '{name}' registered.")
@@ -170,7 +170,7 @@ def _revoke_agent(name: str) -> None:
         conn.commit()
         print(f"Agent '{name}' revoked.")
     else:
-        print(f"naxe-config: Agent '{name}' not found or already revoked.", file=sys.stderr)
+        print(f"naxe config: Agent '{name}' not found or already revoked.", file=sys.stderr)
         sys.exit(1)
 
 

@@ -52,7 +52,7 @@ def _resolve_session_identity(conn) -> str | None:
     raw_key = os.environ.get("NAXE_API_KEY", "")
     if not raw_key:
         raise SystemExit(
-            "naxe: NAXE_API_KEY is required — register an agent with: naxe-config register-agent <name>"
+            "naxe: NAXE_API_KEY is required — register an agent with: naxe config register-agent <name>"
         )
     if not validate_key_format(raw_key):
         raise SystemExit("naxe: NAXE_API_KEY has invalid format")

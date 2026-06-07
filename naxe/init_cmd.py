@@ -167,7 +167,7 @@ def main() -> None:
     _print(f"  Jobs:      {jobs_str}")
     _print(f"  Theme:     {theme}")
     _print()
-    _print("  Setup complete. Run `naxe-config status` anytime to check.")
+    _print("  Setup complete. Run `naxe config status` anytime to check.")
     _print()
 
 

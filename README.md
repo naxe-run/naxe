@@ -12,7 +12,7 @@ uv tool install naxe
 # or: pip install naxe
 ```
 
-This makes `naxe`, `naxe-init`, `naxe-config`, and `naxe-ui` available globally.
+This makes `naxe`, `naxe-init`, `naxe config`, and `naxe-ui` available globally.
 
 For development (editable install):
 
@@ -83,7 +83,7 @@ export NAXE_DB_URL=postgresql://user:pass@localhost/naxe
 Or store it permanently:
 
 ```bash
-naxe-config set-url postgresql://user:pass@localhost/naxe
+naxe config set-url postgresql://user:pass@localhost/naxe
 ```
 
 PostgreSQL is the right choice when:
@@ -101,7 +101,7 @@ To enforce identity and access control, register agents with API keys:
 
 ```bash
 # Register an agent (first registration requires no key)
-naxe-config register-agent my-agent
+naxe config register-agent my-agent
 # → Key: naxe_sk_...   Store this — it will not be shown again.
 
 # Add the key to your MCP config
@@ -116,9 +116,9 @@ Once any agent is registered, naxe enforces `NAXE_API_KEY` on every connection. 
 ### Managing agents
 
 ```bash
-naxe-config list-agents           # Show all registered agents and their status
-naxe-config revoke-agent <name>   # Revoke an agent's key
-naxe-config register-agent <name> # Register a new agent (requires NAXE_API_KEY if others exist)
+naxe config list-agents           # Show all registered agents and their status
+naxe config revoke-agent <name>   # Revoke an agent's key
+naxe config register-agent <name> # Register a new agent (requires NAXE_API_KEY if others exist)
 ```
 
 ### When to use auth
@@ -133,10 +133,10 @@ naxe-config register-agent <name> # Register a new agent (requires NAXE_API_KEY 
 ## Configuration
 
 ```bash
-naxe-config get-url          # Show current DB URL and where it came from
-naxe-config set-url <url>    # Save a DB URL to ~/.config/naxe/config
-naxe-config get-theme        # Show current TUI theme
-naxe-config set-theme <name> # Save theme (built-in: naxe, naxe-bold)
+naxe config get-url          # Show current DB URL and where it came from
+naxe config set-url <url>    # Save a DB URL to ~/.config/naxe/config
+naxe config get-theme        # Show current TUI theme
+naxe config set-theme <name> # Save theme (built-in: naxe, naxe-bold)
 ```
 
 Environment variables take precedence over config files:

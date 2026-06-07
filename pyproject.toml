@@ -37,10 +37,7 @@ Source = "https://github.com/naxe-run/naxe"
 Issues = "https://github.com/naxe-run/naxe/issues"
 
 [project.scripts]
-naxe = "naxe.server:main"
-naxe-init = "naxe.init_cmd:main"
-naxe-config = "naxe.cli_config:main"
-naxe-ui = "naxe.tui:main"
+naxe = "naxe.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
