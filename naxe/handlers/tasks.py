@@ -52,6 +52,9 @@ def handle_complete_task(conn, arguments: dict) -> list:
     result = store.complete_task(conn, task_id, agent_id, arguments.get("output"))
     if "error" in result:
         return _err(result["error"])
+    if result.get("routed_to_approval"):
+        return _ok(success=True, task=result["task"], routed_to_approval=True,
+                   message="Task requires approval — routed to awaiting_approval instead of completing.")
     warning = None
     if task.get("owner_agent_id") and task["owner_agent_id"] != agent_id:
         warning = f"Task owned by '{task['owner_agent_id']}', completing anyway (orchestrator override)"
