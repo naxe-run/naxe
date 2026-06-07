@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     worktree                  INTEGER NOT NULL DEFAULT 0,
     worktree_paths            TEXT,
     max_workers               INTEGER DEFAULT NULL,
-    heartbeat_timeout_seconds INTEGER NOT NULL DEFAULT 300
+    heartbeat_timeout_seconds INTEGER NOT NULL DEFAULT 300,
+    context                   TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tasks (

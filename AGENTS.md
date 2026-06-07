@@ -4,6 +4,10 @@
 
 This project uses **Naxe** for all task tracking and dependency management via MCP.
 
+## Context
+
+Naxe supports server-level contexts (workspaces) to isolate jobs — e.g. `home` vs `work`. Context is a server configuration, not a tool parameter. You do not need to set or read it. Jobs you create will automatically be stamped with the active context, and you will only see jobs in that context.
+
 ## Rules — follow these exactly
 
 - ALWAYS use `create_job` at the start of any multi-step task.

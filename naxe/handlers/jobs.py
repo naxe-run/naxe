@@ -11,6 +11,7 @@ def handle_create_job(conn, arguments: dict) -> list:
         conn, arguments["name"],
         arguments.get("max_workers"),
         worktree=arguments.get("worktree", False),
+        context=arguments.get("_context"),
     )
     return _ok(job_id=job["id"], job=job)
 
@@ -19,7 +20,7 @@ def handle_list_jobs(conn, arguments: dict) -> list:
     limit = arguments.get("limit", 50)
     offset = arguments.get("offset", 0)
     id_prefix = arguments.get("id_prefix")
-    page = store.list_jobs(conn, limit=limit, offset=offset, id_prefix=id_prefix)
+    page = store.list_jobs(conn, limit=limit, offset=offset, id_prefix=id_prefix, context=arguments.get("_context"))
     result = []
     for job in page["jobs"]:
         tasks = store.get_tasks_for_job(conn, job["id"])

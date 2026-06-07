@@ -37,6 +37,7 @@ def main() -> None:
     from naxe.config import (
         resolve_db_url_with_source, write_config_url,
         resolve_theme_with_source,
+        resolve_context_with_source, write_context,
     )
     from naxe import store
     from naxe.schema import get_connection
@@ -54,7 +55,7 @@ def main() -> None:
     # ── Step 1: Database ──────────────────────────────────────────────────────
 
     _hr()
-    _print("Step 1 of 3 — Database")
+    _print("Step 1 of 4 — Database")
     _hr()
     _print()
 
@@ -92,7 +93,7 @@ def main() -> None:
 
     _print()
     _hr()
-    _print("Step 2 of 3 — Authentication")
+    _print("Step 2 of 4 — Authentication")
     _hr()
     _print()
 
@@ -118,11 +119,34 @@ def main() -> None:
         _print(f"  Auth is locked — {active_agents} active agent(s), {total_agents - active_agents} revoked.")
         _print("  Skipping auth setup.")
 
+    # ── Step 3: Context ───────────────────────────────────────────────────────
+
+    _print()
+    _hr()
+    _print("Step 3 of 4 — Context")
+    _hr()
+    _print()
+
+    current_ctx, ctx_source = resolve_context_with_source()
+    if current_ctx:
+        _print(f"  Current context: {current_ctx}  ({ctx_source})")
+        _print()
+        if not _confirm("  Change context?", default=False):
+            _print(f"  Keeping context: {current_ctx}")
+            active_context = current_ctx
+        else:
+            active_context = _configure_context()
+    else:
+        _print("  A context lets you separate jobs by workspace (e.g. 'home', 'work').")
+        _print("  Optional — leave blank to use no context.")
+        _print()
+        active_context = _configure_context()
+
     # ── Step 4: MCP config ────────────────────────────────────────────────────
 
     _print()
     _hr()
-    _print("Step 3 of 3 — MCP Configuration")
+    _print("Step 4 of 4 — MCP Configuration")
     _hr()
     _print()
     _print("  Install naxe globally and add it to Claude Code:")
@@ -133,6 +157,8 @@ def main() -> None:
     env_flags = f'--env NAXE_DB_URL="{db_url}"'
     if agent_key:
         env_flags += f" \\\n      --env NAXE_API_KEY={agent_key}"
+    if active_context:
+        env_flags += f" \\\n      --env NAXE_CONTEXT={active_context}"
 
     _print(f"    claude mcp add --scope user --transport stdio naxe \\")
     _print(f"      {env_flags} \\")
@@ -166,9 +192,20 @@ def main() -> None:
         _print(f"  Auth:      Locked — {active_agents} active agent(s)")
     _print(f"  Jobs:      {jobs_str}")
     _print(f"  Theme:     {theme}")
+    _print(f"  Context:   {active_context if active_context else '(none)'}")
     _print()
     _print("  Setup complete. Run `naxe config status` anytime to check.")
     _print()
+
+
+def _configure_context() -> str | None:
+    from naxe.config import write_context
+
+    name = _ask("  Context name (leave blank for none)", default="")
+    if name:
+        write_context(name)
+        print(f"  Saved.")
+    return name or None
 
 
 def _configure_db() -> str:

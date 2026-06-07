@@ -5,32 +5,41 @@ from naxe.schema import TaskStatus, JobStatus
 from naxe.store.core import _now, _row, get_job, log_event, update_job_status
 
 
-def create_job(conn, name: str, max_workers: int | None = None, worktree: bool = False) -> dict:
+def create_job(conn, name: str, max_workers: int | None = None, worktree: bool = False, context: str | None = None) -> dict:
     job_id = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO jobs (id, name, created_at, status, max_workers, worktree) VALUES (%s, %s, %s, 'active', %s, %s)",
-        (job_id, name, _now(), max_workers, int(worktree)),
+        "INSERT INTO jobs (id, name, created_at, status, max_workers, worktree, context) VALUES (%s, %s, %s, 'active', %s, %s, %s)",
+        (job_id, name, _now(), max_workers, int(worktree), context),
     )
     return _row(conn.execute("SELECT * FROM jobs WHERE id = %s", (job_id,)).fetchone())
 
 
-def list_jobs(conn, limit: int = 50, offset: int = 0, id_prefix: str | None = None) -> dict:
+def list_jobs(conn, limit: int = 50, offset: int = 0, id_prefix: str | None = None, context: str | None = None) -> dict:
+    ctx_clause = "context IS NULL" if context is None else "context = %s"
+    ctx_params: tuple = () if context is None else (context,)
+
     if id_prefix:
         pattern = id_prefix + "%"
-        total = conn.execute("SELECT COUNT(*) as n FROM jobs WHERE id LIKE %s", (pattern,)).fetchone()["n"]
+        total = conn.execute(
+            f"SELECT COUNT(*) as n FROM jobs WHERE id LIKE %s AND {ctx_clause}",
+            (pattern,) + ctx_params,
+        ).fetchone()["n"]
         jobs = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM jobs WHERE id LIKE %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                (pattern, limit, offset),
+                f"SELECT * FROM jobs WHERE id LIKE %s AND {ctx_clause} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (pattern,) + ctx_params + (limit, offset),
             ).fetchall()
         ]
     else:
-        total = conn.execute("SELECT COUNT(*) as n FROM jobs").fetchone()["n"]
+        total = conn.execute(
+            f"SELECT COUNT(*) as n FROM jobs WHERE {ctx_clause}", ctx_params
+        ).fetchone()["n"]
         jobs = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT %s OFFSET %s", (limit, offset)
+                f"SELECT * FROM jobs WHERE {ctx_clause} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                ctx_params + (limit, offset),
             ).fetchall()
         ]
     return {"jobs": jobs, "total": total, "has_more": offset + len(jobs) < total}

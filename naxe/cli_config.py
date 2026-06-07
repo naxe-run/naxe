@@ -4,6 +4,7 @@ import sys
 from naxe.config import (
     resolve_db_url, resolve_db_url_with_source, write_config_url, _CONFIG_FILE,
     resolve_theme_with_source, write_theme, _THEME_FILE,
+    resolve_context_with_source, write_context, _CONTEXT_FILE,
 )
 
 
@@ -19,6 +20,8 @@ def main():
         print("  get-url                Print the currently resolved DB URL and its source")
         print("  set-theme <name>       Save a default theme to ~/.config/naxe/theme")
         print("  get-theme              Print the currently resolved theme and its source")
+        print("  set-context <name>     Set the active context (workspace) for naxe")
+        print("  get-context            Print the currently active context and its source")
         print()
         print("Agent commands:")
         print("  register-agent <name>  Register a new agent and print its API key (shown once)")
@@ -53,6 +56,20 @@ def main():
     elif command == "get-theme":
         theme, source = resolve_theme_with_source()
         print(f"{theme}  ({source})")
+
+    elif command == "set-context":
+        if len(args) < 2:
+            print("Usage: naxe config set-context <name>", file=sys.stderr)
+            sys.exit(1)
+        write_context(args[1])
+        print(f"Saved to {_CONTEXT_FILE}")
+
+    elif command == "get-context":
+        ctx, source = resolve_context_with_source()
+        if ctx:
+            print(f"{ctx}  ({source})")
+        else:
+            print(f"(none)  ({source})")
 
     elif command == "register-agent":
         if len(args) < 2:
@@ -120,6 +137,8 @@ def _status() -> None:
         print(f"Jobs:      Unknown (schema not initialised)")
 
     print(f"Theme:     {theme}  ({theme_source})")
+    ctx, ctx_source = resolve_context_with_source()
+    print(f"Context:   {ctx if ctx else '(none)'}  ({ctx_source})")
 
 
 def _register_agent(name: str) -> None:
