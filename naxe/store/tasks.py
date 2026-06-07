@@ -364,7 +364,13 @@ def complete_task(conn, task_id: str, agent_id: str, output: str | None = None) 
     if task.get("human_task") == 1:
         return {"error": "Human tasks cannot be completed by agents — use approve_task or reject_task."}
     if task.get("requires_approval") == 1 and not task.get("approved_by"):
-        return {"error": "Task requires approval before it can be completed. Call request_approval first."}
+        now = _now()
+        conn.execute(
+            "UPDATE tasks SET status = 'awaiting_approval', updated_at = %s WHERE id = %s",
+            (now, task_id),
+        )
+        log_event(conn, task_id, task["job_id"], "approval_requested", agent_id)
+        return {"task": get_task(conn, task_id), "routed_to_approval": True}
     # Spawn recurrence BEFORE marking complete so the job doesn't close prematurely
     recurrence_spawned = None
     recurrence_interval_days = task.get("recurrence_interval_days")
