@@ -12,7 +12,7 @@ from naxe.store.comments import get_recent_comments_for_task
 from naxe.store.jobs import create_job
 
 
-def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None) -> dict:
+def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None, context: str | None = None) -> dict:
     """
     Batch insert tasks + their dependencies atomically.
     Raises ValueError if any dep ID is unknown or the job doesn't exist.
@@ -26,7 +26,7 @@ def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None) -> dict
     if job_id is None:
         if not tasks:
             raise ValueError("tasks must be non-empty when job_id is not provided")
-        job = create_job(conn, tasks[0]["name"])
+        job = create_job(conn, tasks[0]["name"], context=context)
         job_id = job["id"]
         auto_created = True
     else:

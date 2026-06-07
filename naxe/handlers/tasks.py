@@ -16,7 +16,7 @@ def handle_add_tasks(conn, arguments: dict) -> list:
     if resolver.detect_cycle(tasks):
         return _err("Dependency cycle detected in task batch — no tasks were added.")
     try:
-        result = store.add_tasks(conn, job_id, tasks)
+        result = store.add_tasks(conn, job_id, tasks, context=arguments.get("_context"))
     except ValueError as e:
         return _err(str(e))
     return _ok(added=len(result["task_ids"]), task_ids=result["task_ids"], job_id=result["job_id"])

@@ -8,12 +8,13 @@ from mcp.types import Tool, TextContent
 
 from naxe.schema import get_connection
 from naxe import store
-from naxe.config import resolve_db_url
+from naxe.config import resolve_db_url, resolve_context
 from naxe.tools import list_all_tools
 from naxe.handlers import DISPATCH
 from naxe.handlers._common import _err
 
 DB_URL = resolve_db_url()
+CONTEXT = resolve_context()
 
 _shared_conn = None
 _SESSION_AGENT_ID: str | None = None
@@ -93,6 +94,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         if _SESSION_AGENT_ID is not None:
             arguments["agent_id"] = _SESSION_AGENT_ID
+        arguments["_context"] = CONTEXT
         handler = DISPATCH.get(name)
         if handler is None:
             return _err(f"Unknown tool: {name}")

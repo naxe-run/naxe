@@ -3,6 +3,7 @@ from pathlib import Path
 
 _CONFIG_FILE = Path.home() / ".config" / "naxe" / "config"
 _THEME_FILE = Path.home() / ".config" / "naxe" / "theme"
+_CONTEXT_FILE = Path.home() / ".config" / "naxe" / "context"
 
 DEFAULT_THEME = "naxe"
 
@@ -59,3 +60,28 @@ def resolve_theme_with_source() -> tuple[str, str]:
 def write_theme(theme: str) -> None:
     _THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
     _THEME_FILE.write_text(theme + "\n")
+
+
+def resolve_context() -> str | None:
+    if ctx := os.environ.get("NAXE_CONTEXT"):
+        return ctx.strip() or None
+    if _CONTEXT_FILE.exists():
+        ctx = _CONTEXT_FILE.read_text().strip()
+        if ctx:
+            return ctx
+    return None
+
+
+def resolve_context_with_source() -> tuple[str | None, str]:
+    if ctx := os.environ.get("NAXE_CONTEXT"):
+        return ctx.strip() or None, "env:NAXE_CONTEXT"
+    if _CONTEXT_FILE.exists():
+        ctx = _CONTEXT_FILE.read_text().strip()
+        if ctx:
+            return ctx, f"config:{_CONTEXT_FILE}"
+    return None, "default"
+
+
+def write_context(context: str) -> None:
+    _CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _CONTEXT_FILE.write_text(context + "\n")

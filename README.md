@@ -132,6 +132,8 @@ naxe config get-url          # Show current DB URL and where it came from
 naxe config set-url <url>    # Save a DB URL to ~/.config/naxe/config
 naxe config get-theme        # Show current TUI theme
 naxe config set-theme <name> # Save theme (built-in: naxe, naxe-bold)
+naxe config get-context      # Show the active context
+naxe config set-context <name> # Set the active context
 ```
 
 Environment variables take precedence over config files:
@@ -142,6 +144,33 @@ Environment variables take precedence over config files:
 | `NAXE_DB_PATH` | SQLite file path shorthand |
 | `NAXE_API_KEY` | Agent API key for authenticated deployments |
 | `NAXE_THEME` | TUI theme name |
+| `NAXE_CONTEXT` | Active context (workspace) |
+
+## Context
+
+Contexts let you partition jobs into isolated workspaces — for example, separating `home` and `work` tasks on a shared database. Context is a server-level setting; agents never see or set it directly.
+
+```bash
+# Set a context
+naxe config set-context work
+
+# Or via environment variable
+NAXE_CONTEXT=work naxe
+```
+
+When a context is active, only jobs in that context are visible. Jobs created without a context are only visible when no context is set. To use multiple contexts, configure separate MCP server entries with different `NAXE_CONTEXT` values:
+
+```bash
+claude mcp add --scope user --transport stdio naxe-work \
+  --env NAXE_DB_URL="postgresql://..." \
+  --env NAXE_CONTEXT=work \
+  -- naxe
+
+claude mcp add --scope user --transport stdio naxe-home \
+  --env NAXE_DB_URL="postgresql://..." \
+  --env NAXE_CONTEXT=home \
+  -- naxe
+```
 
 ## Tools
 
