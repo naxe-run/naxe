@@ -69,11 +69,6 @@ export NAXE_DB_URL=./naxe.db
 
 Install the PostgreSQL extra:
 
-```bash
-uv sync --extra postgres
-# or: pip install 'naxe[postgres]'
-```
-
 Then point naxe at your database:
 
 ```bash
