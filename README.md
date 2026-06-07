@@ -12,7 +12,7 @@ uv tool install naxe
 # or: pip install naxe
 ```
 
-This makes `naxe`, `naxe-init`, `naxe config`, and `naxe-ui` available globally.
+This makes the `naxe` command available globally.
 
 For development (editable install):
 
@@ -26,7 +26,7 @@ uv tool install --editable ./naxe
 ### 1. Run the setup wizard
 
 ```bash
-naxe-init
+naxe init
 ```
 
 This walks you through database selection (SQLite or PostgreSQL), tests the connection, optionally registers an agent, and prints the exact `claude mcp add` command to paste into your shell.
@@ -234,7 +234,7 @@ Naxe exposes 33 MCP tools grouped by function:
 Naxe includes an interactive terminal UI for browsing jobs and tasks:
 
 ```bash
-naxe-ui
+naxe ui
 ```
 
 Keyboard shortcuts: `Enter` open job, `A` approval queue, `N` new job, `E` edit, `X` cancel, `P` pause/resume, `F` cycle filter, `Q` quit.

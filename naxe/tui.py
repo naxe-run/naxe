@@ -1,4 +1,4 @@
-"""naxe-ui — interactive TUI for browsing Naxe jobs and tasks."""
+"""naxe ui — interactive TUI for browsing Naxe jobs and tasks."""
 
 from __future__ import annotations
 
