@@ -27,6 +27,10 @@ def main() -> None:
         from naxe.cli_config import main as _config
         _config()
 
+    elif cmd == "serve":
+        from naxe.serve_cmd import main as _serve
+        _serve(args[1:])
+
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         print()
@@ -37,4 +41,5 @@ def main() -> None:
         print("  init        Run the setup wizard")
         print("  ui          Open the terminal UI")
         print("  config      Manage configuration")
+        print("  serve       Start the HTTP/SSE server")
         sys.exit(1)
