@@ -93,7 +93,7 @@ def _task_label(task: dict) -> Text:
     status = task["status"]
     display_status = task.get("display_status", status)
     is_human = bool(task.get("human_task"))
-    req_approval = bool(task.get("requires_approval"))
+    req_approval = bool(task.get("approval_gate"))
 
     if is_human and status == TaskStatus.PENDING:
         symbol, style = "☻", _C_PENDING
@@ -147,7 +147,7 @@ def _render_task_detail(task: dict | None, events: list[dict]) -> str:
     lines.append("")
 
     badge = f"[{sty}]{sym} {status_label}[/{sty}]"
-    if not is_human and task.get("requires_approval"):
+    if not is_human and task.get("approval_gate"):
         badge += f"  [{_C_APPROVAL}]⧗ approval required[/{_C_APPROVAL}]"
     lines.append(badge)
 

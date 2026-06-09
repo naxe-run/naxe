@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     approved_by              TEXT,
     approval_notes           TEXT,
     approval_round           INTEGER NOT NULL DEFAULT 0,
-    requires_approval        INTEGER NOT NULL DEFAULT 0,
+    approval_gate            INTEGER NOT NULL DEFAULT 0,
     human_task               INTEGER NOT NULL DEFAULT 0,
     last_heartbeat_at        TIMESTAMP,
     created_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

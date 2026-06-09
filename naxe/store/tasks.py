@@ -62,7 +62,7 @@ def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None, context
         conn.execute(
             """INSERT INTO tasks
                (id, job_id, name, description, status, duration_minutes, max_retries, input,
-                resources, priority, repo, requires_approval, human_task, start_date, due_date,
+                resources, priority, repo, approval_gate, human_task, start_date, due_date,
                 recurrence_interval_days, critical, created_at, updated_at)
                VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
@@ -70,7 +70,7 @@ def add_tasks(conn, job_id: str | None = None, tasks: list[dict] = None, context
                 t.get("duration_minutes"), t.get("max_retries", 0), t.get("input"),
                 json.dumps(resources) if resources is not None else None,
                 t.get("priority", 50), t.get("repo"),
-                1 if t.get("requires_approval") else 0,
+                1 if t.get("approval_gate") else 0,
                 1 if t.get("human_task") else 0,
                 t.get("start_date"),
                 t.get("due_date"),
@@ -357,13 +357,13 @@ def update_task_status(
 
 
 def complete_task(conn, task_id: str, agent_id: str, output: str | None = None) -> dict:
-    """Complete a task, enforcing human_task and requires_approval guards."""
+    """Complete a task, enforcing human_task and approval_gate guards."""
     task = get_task(conn, task_id)
     if not task:
         return {"error": f"Task '{task_id}' not found"}
     if task.get("human_task") == 1:
         return {"error": "Human tasks cannot be completed by agents — use approve_task or reject_task."}
-    if task.get("requires_approval") == 1 and not task.get("approved_by"):
+    if task.get("approval_gate") == 1 and not task.get("approved_by"):
         now = _now()
         conn.execute(
             "UPDATE tasks SET status = 'awaiting_approval', updated_at = %s WHERE id = %s",
@@ -377,7 +377,7 @@ def complete_task(conn, task_id: str, agent_id: str, output: str | None = None) 
     if recurrence_interval_days:
         new_start = (datetime.now(timezone.utc) + timedelta(days=recurrence_interval_days)).isoformat()
         copy_fields = ("name", "description", "duration_minutes", "max_retries", "input",
-                       "resources", "priority", "repo", "requires_approval", "human_task",
+                       "resources", "priority", "repo", "approval_gate", "human_task",
                        "recurrence_interval_days", "due_date", "critical")
         new_task = {f: task[f] for f in copy_fields if task.get(f) is not None}
         new_task["start_date"] = new_start

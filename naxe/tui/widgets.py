@@ -236,7 +236,7 @@ class AddTaskModal(ModalScreen):
                 yield Label("Description", classes="modal-field-label")
                 yield Button("", id="btn-edit-desc", classes="text-field-btn")
                 yield Checkbox("Human task", id="t-human-task")
-                yield Checkbox("Requires approval", id="t-requires-approval")
+                yield Checkbox("Approval gate", id="t-approval-gate")
                 yield Checkbox("Critical", id="t-critical")
                 yield Label("Priority (0–100, default 50)", classes="modal-field-label")
                 yield Input(value="50", id="t-priority")
@@ -347,8 +347,8 @@ class AddTaskModal(ModalScreen):
         if self.query_one("#t-human-task", Checkbox).value:
             task["human_task"] = True
 
-        if self.query_one("#t-requires-approval", Checkbox).value:
-            task["requires_approval"] = True
+        if self.query_one("#t-approval-gate", Checkbox).value:
+            task["approval_gate"] = True
 
         if self.query_one("#t-critical", Checkbox).value:
             task["critical"] = True
