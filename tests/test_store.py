@@ -535,18 +535,18 @@ def test_complete_task_rejects_human_task(conn):
     assert "human" in result["error"].lower()
 
 
-# requires_approval unaffected
+# approval_gate unaffected
 
-def test_requires_approval_does_not_auto_transition(conn):
-    job = store.create_job(conn, "req-approval-no-auto")
-    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "requires_approval": True}])
+def test_approval_gate_does_not_auto_transition(conn):
+    job = store.create_job(conn, "approval-gate-no-auto")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "approval_gate": True}])
     task = store.get_task(conn, "t1")
     assert task["status"] == "pending"
 
 
-def test_requires_approval_agent_flow_intact(conn):
-    job = store.create_job(conn, "req-approval-flow")
-    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "requires_approval": True}])
+def test_approval_gate_agent_flow_intact(conn):
+    job = store.create_job(conn, "approval-gate-flow")
+    store.add_tasks(conn, job["id"], [{"id": "t1", "name": "Approval task", "approval_gate": True}])
     store.claim_task(conn, "t1", "agent-1")
     task = store.request_approval(conn, "t1", "agent-1", notes="please review")
     assert task["status"] == "awaiting_approval"
@@ -558,10 +558,10 @@ def test_requires_approval_agent_flow_intact(conn):
 # Approval feedback loop
 
 def _setup_approval_task(conn, max_retries=0):
-    """Helper: create a job + requires_approval task, claim it, request approval."""
+    """Helper: create a job + approval_gate task, claim it, request approval."""
     job = store.create_job(conn, "feedback-loop-job")
     store.add_tasks(conn, job["id"], [
-        {"id": "afl1", "name": "Approval task", "requires_approval": True, "max_retries": max_retries}
+        {"id": "afl1", "name": "Approval task", "approval_gate": True, "max_retries": max_retries}
     ])
     store.claim_task(conn, "afl1", "agent-1")
     store.request_approval(conn, "afl1", "agent-1", notes="ready for review")
@@ -633,7 +633,7 @@ def test_claim_task_includes_recent_comments(conn):
 def test_claim_next_action_includes_recent_comments(conn):
     job = store.create_job(conn, "cna-feedback-job")
     store.add_tasks(conn, job["id"], [
-        {"id": "afl-cna1", "name": "Approval task", "requires_approval": True}
+        {"id": "afl-cna1", "name": "Approval task", "approval_gate": True}
     ])
     store.claim_task(conn, "afl-cna1", "agent-1")
     store.request_approval(conn, "afl-cna1", "agent-1", notes="ready")
@@ -914,7 +914,7 @@ def test_display_status_scheduled_task_not_in_next_actions(conn):
 def test_startup_scan_only_processes_human_tasks(conn):
     job = store.create_job(conn, "startup-scan")
     store.add_tasks(conn, job["id"], [
-        {"id": "ra", "name": "Requires approval", "requires_approval": True},
+        {"id": "ra", "name": "Approval gate", "approval_gate": True},
         {"id": "ht", "name": "Human task", "human_task": True},
     ])
     # Force both back to pending to simulate pre-scan state

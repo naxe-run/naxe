@@ -35,7 +35,7 @@ create_job("name")
 
 ## Approvals and the feedback loop
 
-Some tasks require human approval before they are considered complete. You do not need to handle this yourself — just call `complete_task` as normal. If the task has `requires_approval` set, it will automatically route to `awaiting_approval` instead of completing. The response will include `routed_to_approval: true` so you know what happened.
+Some tasks require human approval before they are considered complete. You do not need to handle this yourself — just call `complete_task` as normal. If the task has `approval_gate` set, it will automatically route to `awaiting_approval` instead of completing. The response will include `routed_to_approval: true` so you know what happened.
 
 A human reviewer then takes one of three actions:
 

@@ -52,7 +52,7 @@ def _task_label(task: dict) -> Text:
         symbol, style = "☻", "dim"
     elif is_human and status == "awaiting_approval":
         symbol, style = "☻", "bold magenta"
-    elif bool(task.get("requires_approval")) and status == "pending":
+    elif bool(task.get("approval_gate")) and status == "pending":
         symbol, style = "⧗", "dim"
     else:
         style = _STATUS_STYLE.get(status, "")
