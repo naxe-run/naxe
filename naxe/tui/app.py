@@ -9,9 +9,9 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Static, Tab, Tabs
 from textual import on
 
-from naxe import store
-from naxe.schema import get_connection, TaskStatus, JobStatus
-from naxe.config import resolve_db_url, resolve_theme
+from naxe.schema import TaskStatus
+from naxe.config import resolve_theme
+from naxe.tui.client import NaxeClient
 from naxe.tui.theme import (
     _NAXE_THEME, _NAXE_BOLD_THEME,
     _apply_theme_palette, _rebuild_status_style,
@@ -25,8 +25,6 @@ from naxe.tui.screens import (
     HumanActionsScreen, JobDetailScreen, _render_job_summary, _relative_time,
 )
 
-DB_URL = resolve_db_url()
-
 _JOB_FILTERS: list[tuple[str, str]] = [
     ("open", "Open"),
     ("all", "All"),
@@ -34,58 +32,6 @@ _JOB_FILTERS: list[tuple[str, str]] = [
     ("cancelled", "Cancelled"),
 ]
 _JOB_FILTER_KEYS = [k for k, _ in _JOB_FILTERS]
-
-
-def _batch_task_counts(conn, job_ids: list[str]) -> dict[str, dict[str, int]]:
-    """Single query: returns {job_id: {status: count, 'human_waiting': count}}."""
-    if not job_ids:
-        return {}
-    placeholders = ",".join(["%s"] * len(job_ids))
-    rows = conn.execute(
-        f"SELECT job_id, status, COUNT(*) as cnt FROM tasks "
-        f"WHERE job_id IN ({placeholders}) GROUP BY job_id, status",
-        job_ids,
-    ).fetchall()
-    result: dict[str, dict[str, int]] = {}
-    for row in rows:
-        result.setdefault(row["job_id"], {})[row["status"]] = row["cnt"]
-
-    human_rows = conn.execute(
-        f"SELECT job_id, COUNT(*) as cnt FROM tasks "
-        f"WHERE job_id IN ({placeholders}) AND status = 'awaiting_approval' AND human_task = 1 "
-        f"GROUP BY job_id",
-        job_ids,
-    ).fetchall()
-    for row in human_rows:
-        result.setdefault(row["job_id"], {})["human_waiting"] = row["cnt"]
-
-    return result
-
-
-def _fetch_jobs(conn, status_filter: str) -> list[dict]:
-    if status_filter == "open":
-        return [
-            dict(r) for r in conn.execute(
-                "SELECT * FROM jobs WHERE status NOT IN ('completed', 'cancelled') ORDER BY created_at DESC"
-            ).fetchall()
-        ]
-    if status_filter == "completed":
-        return [
-            dict(r) for r in conn.execute(
-                "SELECT * FROM jobs WHERE status = 'completed' ORDER BY created_at DESC LIMIT 200"
-            ).fetchall()
-        ]
-    if status_filter == "cancelled":
-        return [
-            dict(r) for r in conn.execute(
-                "SELECT * FROM jobs WHERE status = 'cancelled' ORDER BY created_at DESC LIMIT 200"
-            ).fetchall()
-        ]
-    return [
-        dict(r) for r in conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 500"
-        ).fetchall()
-    ]
 
 
 def _job_status_cell(job: dict) -> Text:
@@ -204,6 +150,14 @@ class NaxeUI(App):
 
     job_filter: reactive[str] = reactive("open")
 
+    def __init__(self, client: NaxeClient, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._client = client
+
+    @property
+    def client(self) -> NaxeClient:
+        return self._client
+
     def compose(self) -> ComposeResult:
         yield Static("", id="list-header")
         yield Tabs(
@@ -236,7 +190,6 @@ class NaxeUI(App):
             _apply_theme_palette(theme_obj)
             _rebuild_status_style()
 
-        self._conn = get_connection(DB_URL, readonly=False)
         self._selected_job_id: str | None = None
 
         table = self.query_one("#jobs-table", DataTable)
@@ -250,9 +203,9 @@ class NaxeUI(App):
         table.focus()
 
     def _load(self) -> None:
-        self._conn.rollback()
-        jobs = _fetch_jobs(self._conn, self.job_filter)
-        counts_by_job = _batch_task_counts(self._conn, [j["id"] for j in jobs])
+        self._client.rollback()
+        jobs = self._client.fetch_jobs(self.job_filter)
+        counts_by_job = self._client.batch_task_counts([j["id"] for j in jobs])
 
         table = self.query_one("#jobs-table", DataTable)
         anchor_id = self._selected_job_id
@@ -281,21 +234,23 @@ class NaxeUI(App):
             f"[bold]Jobs[/bold]  [dim]·  {total} {label}[/dim]"
             f"  [dim]↑↓ navigate  Enter open[/dim]"
         )
-        self._conn.rollback()
+        self._client.rollback()
 
     def _refresh(self) -> None:
         self._load()
         if self._selected_job_id:
-            job = store.get_job(self._conn, self._selected_job_id)
-            self.query_one("#job-summary", Static).update(_render_job_summary(self._conn, job))
-        self._conn.rollback()
+            job = self._client.get_job(self._selected_job_id)
+            counts = self._client.batch_task_counts([self._selected_job_id]).get(self._selected_job_id, {})
+            self.query_one("#job-summary", Static).update(_render_job_summary(job, counts))
+        self._client.rollback()
 
     @on(DataTable.RowHighlighted)
     def on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         job_id = str(event.row_key.value)
         self._selected_job_id = job_id
-        job = store.get_job(self._conn, job_id)
-        self.query_one("#job-summary", Static).update(_render_job_summary(self._conn, job))
+        job = self._client.get_job(job_id)
+        counts = self._client.batch_task_counts([job_id]).get(job_id, {})
+        self.query_one("#job-summary", Static).update(_render_job_summary(job, counts))
 
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -337,8 +292,7 @@ class NaxeUI(App):
         if task is None:
             return
         try:
-            result = store.add_tasks(self._conn, tasks=[task])
-            self._conn.commit()
+            result = self._client.add_tasks([task])
             self._load()
             self.push_screen(JobDetailScreen(result["job_id"]))
         except Exception as e:
@@ -351,8 +305,7 @@ class NaxeUI(App):
         if result is None:
             return
         try:
-            store.create_job(self._conn, **result)
-            self._conn.commit()
+            self._client.create_job(**result)
             self._load()
         except Exception as e:
             self.notify(str(e), title="Error creating job", severity="error")
@@ -361,7 +314,7 @@ class NaxeUI(App):
         if not self._selected_job_id:
             self.notify("No job selected", severity="warning")
             return
-        job = store.get_job(self._conn, self._selected_job_id)
+        job = self._client.get_job(self._selected_job_id)
         if job is None:
             return
         self.push_screen(EditJobModal(job), self._on_job_edited)
@@ -370,11 +323,11 @@ class NaxeUI(App):
         if result is None:
             return
         try:
-            store.edit_job(self._conn, self._selected_job_id, result)
-            self._conn.commit()
+            self._client.edit_job(self._selected_job_id, result)
             self._load()
-            job = store.get_job(self._conn, self._selected_job_id)
-            self.query_one("#job-summary", Static).update(_render_job_summary(self._conn, job))
+            job = self._client.get_job(self._selected_job_id)
+            counts = self._client.batch_task_counts([self._selected_job_id]).get(self._selected_job_id, {})
+            self.query_one("#job-summary", Static).update(_render_job_summary(job, counts))
         except Exception as e:
             self.notify(str(e), title="Error editing job", severity="error")
 
@@ -382,10 +335,10 @@ class NaxeUI(App):
         if not self._selected_job_id:
             self.notify("No job selected", severity="warning")
             return
-        job = store.get_job(self._conn, self._selected_job_id)
+        job = self._client.get_job(self._selected_job_id)
         if job is None:
             return
-        if job["status"] == JobStatus.CANCELLED:
+        if job["status"] == TaskStatus.CANCELLED:
             self.notify("Job is already cancelled", severity="warning")
             return
         self.push_screen(
@@ -397,8 +350,7 @@ class NaxeUI(App):
         if not confirmed:
             return
         try:
-            result = store.cancel_job(self._conn, self._selected_job_id)
-            self._conn.commit()
+            result = self._client.cancel_job(self._selected_job_id)
             n = result["tasks_cancelled"]
             self.notify(f"Job cancelled ({n} task{'s' if n != 1 else ''} cancelled)", severity="warning")
             self._load()
@@ -412,12 +364,11 @@ class NaxeUI(App):
         if not self._selected_job_id:
             self.notify("No job selected", severity="warning")
             return
-        job = store.get_job(self._conn, self._selected_job_id)
+        job = self._client.get_job(self._selected_job_id)
         if job is None:
             return
         if job.get("paused"):
-            store.resume_job(self._conn, self._selected_job_id)
-            self._conn.commit()
+            self._client.resume_job(self._selected_job_id)
             self._load()
             self.notify("Job resumed")
         else:
@@ -429,11 +380,11 @@ class NaxeUI(App):
     def _on_pause_confirmed(self, reason: str | None) -> None:
         if reason is None:
             return
-        store.pause_job(self._conn, self._selected_job_id, reason=reason or None)
-        self._conn.commit()
+        self._client.pause_job(self._selected_job_id, reason=reason or None)
         self._load()
-        job = store.get_job(self._conn, self._selected_job_id)
-        self.query_one("#job-summary", Static).update(_render_job_summary(self._conn, job))
+        job = self._client.get_job(self._selected_job_id)
+        counts = self._client.batch_task_counts([self._selected_job_id]).get(self._selected_job_id, {})
+        self.query_one("#job-summary", Static).update(_render_job_summary(job, counts))
         self.notify("Job paused")
 
     def action_cycle_filter(self) -> None:
@@ -441,11 +392,3 @@ class NaxeUI(App):
         next_key = _JOB_FILTER_KEYS[(idx + 1) % len(_JOB_FILTER_KEYS)]
         tabs = self.query_one("#job-filter-tabs", Tabs)
         tabs.active = f"jf-{next_key}"
-
-
-def main() -> None:
-    NaxeUI().run()
-
-
-if __name__ == "__main__":
-    main()

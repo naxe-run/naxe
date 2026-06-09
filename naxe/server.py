@@ -1,5 +1,6 @@
 import json
 import os
+from contextvars import ContextVar
 from typing import Any
 
 from mcp.server import Server
@@ -17,7 +18,7 @@ DB_URL = resolve_db_url()
 CONTEXT = resolve_context()
 
 _shared_conn = None
-_SESSION_AGENT_ID: str | None = None
+_request_agent_id: ContextVar[str | None] = ContextVar('_request_agent_id', default=None)
 
 
 def _conn():
@@ -92,8 +93,9 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     conn = _conn_with_retry()
     try:
-        if _SESSION_AGENT_ID is not None:
-            arguments["agent_id"] = _SESSION_AGENT_ID
+        agent_id = _request_agent_id.get()
+        if agent_id is not None:
+            arguments["agent_id"] = agent_id
         arguments["_context"] = CONTEXT
         handler = DISPATCH.get(name)
         if handler is None:
@@ -110,9 +112,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _run():
-    global _SESSION_AGENT_ID
     conn = _conn()
-    _SESSION_AGENT_ID = _resolve_session_identity(conn)
+    _request_agent_id.set(_resolve_session_identity(conn))
     store.startup_scan_awaiting_approval(conn)
     conn.commit()
     async with stdio_server() as streams:

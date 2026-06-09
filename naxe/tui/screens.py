@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from rich.markup import escape
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.reactive import reactive
@@ -13,9 +14,8 @@ from textual.widgets import DataTable, Footer, Static, Tab, Tabs, Tree
 from textual.widgets.tree import TreeNode
 from textual import on
 
-from naxe import store
-from naxe.schema import get_connection, TaskStatus
-from naxe.config import resolve_db_url
+from naxe.schema import TaskStatus
+from naxe.tui.client import NaxeClient
 from naxe.tui.theme import (
     _C_PENDING, _C_RUNNING, _C_COMPLETE, _C_FAILED, _C_CANCELLED,
     _C_HUMAN, _C_APPROVAL, _C_JOB_DONE, _C_JOB_DEAD, _C_JOB_ACTIVE,
@@ -25,8 +25,6 @@ from naxe.tui.widgets import (
     ConfirmModal, PromptModal, TextEditorModal, AddTaskModal, EditTaskModal,
 )
 
-DB_URL = resolve_db_url()
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,7 +32,9 @@ def _fmt_ts(ts: str | None) -> str:
     if not ts:
         return "—"
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return str(ts)
@@ -44,8 +44,10 @@ def _relative_time(ts: str | None) -> str:
     if not ts:
         return "—"
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        delta = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt
         s = int(delta.total_seconds())
         if s < 60:
             return f"{s}s ago"
@@ -59,12 +61,13 @@ def _relative_time(ts: str | None) -> str:
 
 
 def _fmt_due_date(ts: str | None) -> tuple[str, bool]:
-    """Returns (formatted date string, is_overdue). Returns ('', False) when null."""
     if not ts:
         return "", False
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        is_overdue = dt.astimezone(timezone.utc) < datetime.now(timezone.utc)
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        is_overdue = dt < datetime.now(timezone.utc)
         label = dt.strftime("%b ") + str(dt.day)
         return label, is_overdue
     except Exception:
@@ -265,7 +268,7 @@ def _render_task_detail(task: dict | None, events: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _render_job_summary(conn, job: dict | None) -> str:
+def _render_job_summary(job: dict | None, counts: dict[str, int]) -> str:
     if job is None:
         return "[dim]Select a job to view its summary.[/dim]"
 
@@ -294,22 +297,17 @@ def _render_job_summary(conn, job: dict | None) -> str:
     lines.append(badge)
     lines.append("")
 
-    tasks = store.get_tasks_for_job(conn, job["id"])
-    total = len(tasks)
+    total = sum(v for k, v in counts.items() if k != "human_waiting")
     if total == 0:
         lines.append("[dim]No tasks.[/dim]")
     else:
-        counts: dict[str, int] = {}
-        for t in tasks:
-            counts[t["status"]] = counts.get(t["status"], 0) + 1
-
         done = counts.get("completed", 0)
         running = counts.get("in_progress", 0)
         pending = counts.get("pending", 0)
         failed = counts.get("failed", 0)
         cancelled = counts.get("cancelled", 0)
-        human_waiting = sum(1 for t in tasks if t["status"] == TaskStatus.AWAITING_APPROVAL and t.get("human_task"))
-        approval_waiting = sum(1 for t in tasks if t["status"] == TaskStatus.AWAITING_APPROVAL and not t.get("human_task"))
+        human_waiting = counts.get("human_waiting", 0)
+        approval_waiting = counts.get("awaiting_approval", 0) - human_waiting
 
         lines.append(f"[bold]{done}/{total}[/bold] [dim]tasks completed[/dim]")
         if running:
@@ -348,19 +346,6 @@ def _render_job_summary(conn, job: dict | None) -> str:
 
 
 # ── Human Actions Screen ──────────────────────────────────────────────────────
-
-def _fetch_human_actions(conn) -> list[dict]:
-    """All awaiting_approval tasks across active jobs, ordered by priority then age."""
-    rows = conn.execute(
-        """SELECT t.*, j.name AS job_name
-           FROM tasks t
-           JOIN jobs j ON t.job_id = j.id
-           WHERE t.status = 'awaiting_approval'
-             AND j.status NOT IN ('cancelled', 'completed')
-           ORDER BY t.priority DESC, t.created_at ASC"""
-    ).fetchall()
-    return [dict(r) for r in rows]
-
 
 class HumanActionsScreen(Screen):
     CSS = """
@@ -440,7 +425,6 @@ class HumanActionsScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._conn = get_connection(DB_URL, readonly=False)
         self._selected_task_id: str | None = None
         self._selected_job_id: str | None = None
 
@@ -456,8 +440,8 @@ class HumanActionsScreen(Screen):
         table.focus()
 
     def _load(self) -> None:
-        self._conn.rollback()
-        tasks = _fetch_human_actions(self._conn)
+        self.app.client.rollback()
+        tasks = self.app.client.fetch_human_actions()
 
         table = self.query_one("#actions-table", DataTable)
         anchor_id = self._selected_task_id
@@ -489,20 +473,20 @@ class HumanActionsScreen(Screen):
         )
 
         if self._selected_task_id:
-            task = store.get_task(self._conn, self._selected_task_id)
+            task = self.app.client.get_task(self._selected_task_id)
             if task:
-                events = store.get_task_events(self._conn, self._selected_task_id)
+                events = self.app.client.get_task_events(self._selected_task_id)
                 self.query_one("#actions-detail", Static).update(_render_task_detail(task, events))
-        self._conn.rollback()
+        self.app.client.rollback()
 
     @on(DataTable.RowHighlighted)
     def on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         task_id = str(event.row_key.value)
         self._selected_task_id = task_id
-        task = store.get_task(self._conn, task_id)
+        task = self.app.client.get_task(task_id)
         if task:
             self._selected_job_id = task["job_id"]
-            events = store.get_task_events(self._conn, task_id)
+            events = self.app.client.get_task_events(task_id)
             self.query_one("#actions-detail", Static).update(_render_task_detail(task, events))
 
     @on(DataTable.RowSelected)
@@ -512,7 +496,7 @@ class HumanActionsScreen(Screen):
     def _selected_task(self) -> dict | None:
         if not self._selected_task_id:
             return None
-        return store.get_task(self._conn, self._selected_task_id)
+        return self.app.client.get_task(self._selected_task_id)
 
     def action_approve_task(self) -> None:
         task = self._selected_task()
@@ -529,11 +513,7 @@ class HumanActionsScreen(Screen):
         if not confirmed:
             return
         try:
-            result = store.approve_task(self._conn, task_id, approver_id="human")
-            if result is None:
-                self.notify("Could not approve task", severity="warning")
-                return
-            self._conn.commit()
+            self.app.client.approve_task(task_id)
             self._selected_task_id = None
             self._load()
             self.notify("Task approved", severity="information")
@@ -557,11 +537,7 @@ class HumanActionsScreen(Screen):
             self.notify("A reason is required to reject a task", severity="error")
             return
         try:
-            result = store.reject_task(self._conn, task_id, approver_id="human", reason=reason)
-            if result is None:
-                self.notify("Could not reject task", severity="warning")
-                return
-            self._conn.commit()
+            self.app.client.reject_task(task_id, reason)
             self._selected_task_id = None
             self._load()
             self.notify("Task rejected", severity="warning")
@@ -586,11 +562,7 @@ class HumanActionsScreen(Screen):
             self.notify("Feedback is required", severity="error")
             return
         try:
-            result = store.return_task(self._conn, task_id, approver_id="human", feedback=feedback)
-            if result is None:
-                self.notify("Could not return task", severity="warning")
-                return
-            self._conn.commit()
+            self.app.client.return_task(task_id, feedback)
             self._selected_task_id = None
             self._load()
             self.notify("Task returned for revision")
@@ -709,7 +681,6 @@ class JobDetailScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._conn = get_connection(DB_URL, readonly=False)
         tree = self.query_one("#task-tree", Tree)
         tree.show_root = False
         self._load()
@@ -717,8 +688,8 @@ class JobDetailScreen(Screen):
         tree.focus()
 
     def _load(self) -> None:
-        self._conn.rollback()
-        self._current_job = store.get_job(self._conn, self._job_id)
+        self.app.client.rollback()
+        self._current_job = self.app.client.get_job(self._job_id)
         self._update_header()
         self._rebuild_tree()
         self._refresh_detail()
@@ -727,7 +698,7 @@ class JobDetailScreen(Screen):
             node = self._first_task_node(tree.root)
             if node is not None and isinstance(node.data, dict):
                 self._show_task(node.data)
-        self._conn.rollback()
+        self.app.client.rollback()
 
     def _refresh(self) -> None:
         self._load()
@@ -757,7 +728,7 @@ class JobDetailScreen(Screen):
         if job.get("worktree"):
             tags += "  [dim]⎇ worktree[/dim]"
 
-        tasks = store.get_tasks_for_job(self._conn, job["id"])
+        tasks = self.app.client.get_tasks_for_job(job["id"])
         total = len(tasks)
         counts: dict[str, int] = {}
         for t in tasks:
@@ -797,18 +768,11 @@ class JobDetailScreen(Screen):
         if not job:
             return
 
-        tasks = store.get_tasks_for_job(self._conn, job["id"])
+        tasks = self.app.client.get_tasks_for_job(job["id"])
         now_iso = datetime.now(timezone.utc).isoformat()
         if tasks:
             task_ids = [t["id"] for t in tasks]
-            placeholders = ",".join(["%s"] * len(task_ids))
-            dep_rows = self._conn.execute(
-                f"SELECT d.task_id FROM dependencies d "
-                f"JOIN tasks dep ON dep.id = d.depends_on_task_id "
-                f"WHERE d.task_id IN ({placeholders}) AND dep.status != 'completed'",
-                task_ids,
-            ).fetchall()
-            blocked_ids = {r["task_id"] for r in dep_rows}
+            blocked_ids = self.app.client.get_blocked_task_ids(task_ids)
             for t in tasks:
                 t["display_status"] = _compute_display_status(t, blocked_ids, now_iso)
         if not tasks:
@@ -826,11 +790,7 @@ class JobDetailScreen(Screen):
     def _add_tree_nodes(self, root: TreeNode, tasks: list[dict], collapsed: set[str]) -> None:
         task_map = {t["id"]: t for t in tasks}
         task_ids = list(task_map.keys())
-        placeholders = ",".join(["%s"] * len(task_ids))
-        rows = self._conn.execute(
-            f"SELECT task_id, depends_on_task_id FROM dependencies WHERE task_id IN ({placeholders})",
-            task_ids,
-        ).fetchall()
+        rows = self.app.client.get_dependency_edges(task_ids)
 
         children: dict[str, list[str]] = {tid: [] for tid in task_ids}
         has_parent: set[str] = set()
@@ -897,14 +857,14 @@ class JobDetailScreen(Screen):
     def _refresh_detail(self) -> None:
         if not self._selected_task_id:
             return
-        task = store.get_task(self._conn, self._selected_task_id)
+        task = self.app.client.get_task(self._selected_task_id)
         if task:
-            events = store.get_task_events(self._conn, self._selected_task_id)
+            events = self.app.client.get_task_events(self._selected_task_id)
             self.query_one("#task-detail", Static).update(_render_task_detail(task, events))
 
     def _show_task(self, task: dict) -> None:
         self._selected_task_id = task["id"]
-        events = store.get_task_events(self._conn, task["id"])
+        events = self.app.client.get_task_events(task["id"])
         self.query_one("#task-detail", Static).update(_render_task_detail(task, events))
 
     @on(Tree.NodeHighlighted)
@@ -931,15 +891,14 @@ class JobDetailScreen(Screen):
             self._rebuild_tree()
 
     def action_new_task(self) -> None:
-        tasks = store.get_tasks_for_job(self._conn, self._job_id)
+        tasks = self.app.client.get_tasks_for_job(self._job_id)
         self.app.push_screen(AddTaskModal(self._job_id, tasks), self._on_task_added)
 
     def _on_task_added(self, result: dict | None) -> None:
         if result is None:
             return
         try:
-            store.add_tasks(self._conn, self._job_id, [result])
-            self._conn.commit()
+            self.app.client.add_tasks([result], self._job_id)
             self._load()
         except Exception as e:
             self.notify(str(e), title="Error adding task", severity="error")
@@ -953,7 +912,7 @@ class JobDetailScreen(Screen):
         if not task_id:
             self.notify("No task selected", severity="warning")
             return
-        task = store.get_task(self._conn, task_id)
+        task = self.app.client.get_task(task_id)
         if task is None:
             return
         editable = task["status"] == TaskStatus.PENDING or (
@@ -962,15 +921,14 @@ class JobDetailScreen(Screen):
         if not editable:
             self.notify(f"Cannot edit a {task['status'].replace('_', ' ')} task", severity="warning")
             return
-        other_tasks = store.get_tasks_for_job(self._conn, self._job_id)
+        other_tasks = self.app.client.get_tasks_for_job(self._job_id)
         self.app.push_screen(EditTaskModal(task, other_tasks), self._on_task_edited)
 
     def _on_task_edited(self, result: dict | None) -> None:
         if result is None:
             return
         try:
-            store.edit_task(self._conn, self._selected_task_id, result)
-            self._conn.commit()
+            self.app.client.edit_task(self._selected_task_id, result)
             self._load()
         except Exception as e:
             self.notify(str(e), title="Error editing task", severity="error")
@@ -984,7 +942,7 @@ class JobDetailScreen(Screen):
         if not task_id:
             self.notify("No task selected", severity="warning")
             return
-        task = store.get_task(self._conn, task_id)
+        task = self.app.client.get_task(task_id)
         if task is None:
             return
         cancellable = task["status"] in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS) or (
@@ -1002,11 +960,7 @@ class JobDetailScreen(Screen):
         if not confirmed:
             return
         try:
-            result = store.cancel_task(self._conn, task_id)
-            if result is None:
-                self.notify("Task could not be cancelled", severity="warning")
-                return
-            self._conn.commit()
+            self.app.client.cancel_task(task_id)
             self._selected_task_id = None
             self._load()
         except Exception as e:
@@ -1023,8 +977,7 @@ class JobDetailScreen(Screen):
         if job is None:
             return
         if job.get("paused"):
-            store.resume_job(self._conn, job["id"])
-            self._conn.commit()
+            self.app.client.resume_job(job["id"])
             self._load()
             self.notify("Job resumed")
         else:
@@ -1039,8 +992,7 @@ class JobDetailScreen(Screen):
         job = self._current_job
         if job is None:
             return
-        store.pause_job(self._conn, job["id"], reason=reason or None)
-        self._conn.commit()
+        self.app.client.pause_job(job["id"], reason=reason or None)
         self._load()
         self.notify("Job paused")
 

@@ -213,6 +213,7 @@ class EditJobModal(ModalScreen):
 
 class AddTaskModal(ModalScreen):
     CSS = MODAL_CSS
+    BINDINGS = [("ctrl+s", "submit_form", "Submit")]
 
     def __init__(self, job_id: str | None = None, existing_tasks: list[dict] | None = None) -> None:
         super().__init__()
@@ -257,7 +258,7 @@ class AddTaskModal(ModalScreen):
                 yield Input(placeholder="e.g. 2026-06-30", id="t-due-date")
                 yield Label("Recurrence (days, optional)", classes="modal-field-label")
                 yield Input(placeholder="e.g. 7", id="t-recurrence")
-            yield Static("[dim]Ctrl+Enter to submit[/dim]", classes="modal-hint")
+            yield Static("[dim]Ctrl+S to submit[/dim]", classes="modal-hint")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Cancel", id="btn-cancel", variant="default")
                 yield Button("Add Task", id="btn-submit", variant="primary")
@@ -379,15 +380,17 @@ class AddTaskModal(ModalScreen):
             self._input_text = text
             self._update_preview("btn-edit-input", text)
 
+    def action_submit_form(self) -> None:
+        self.query_one("#btn-submit", Button).press()
+
     def on_key(self, event) -> None:
         if event.key == "escape":
             self.dismiss(None)
-        elif event.key == "ctrl+enter":
-            self.query_one("#btn-submit", Button).press()
 
 
 class EditTaskModal(ModalScreen):
     CSS = MODAL_CSS
+    BINDINGS = [("ctrl+s", "submit_form", "Submit")]
 
     def __init__(self, task: dict, existing_tasks: list[dict]) -> None:
         super().__init__()
@@ -544,6 +547,9 @@ class EditTaskModal(ModalScreen):
         if text is not None:
             self._input_text = text
             self._update_preview("btn-edit-input", text)
+
+    def action_submit_form(self) -> None:
+        self.query_one("#btn-submit", Button).press()
 
     def on_key(self, event) -> None:
         if event.key == "escape":
